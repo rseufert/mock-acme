@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import datetime
 import urllib.parse
+from decimal import Decimal
 from typing import Dict, List, Optional
 
 from . import invoice_check
@@ -48,6 +49,8 @@ from . import payment_run
 
 SUPPLIER_INVOICES = ("/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV"
                      "/A_SupplierInvoice")
+INVOICED_ORDER_ITEMS = ("/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV"
+                        "/A_SuplrInvcItemPurOrdRef")
 
 
 def odata_string(value: str) -> str:
@@ -106,6 +109,23 @@ class DurableInvoiceCheck(invoice_check.InvoiceCheck):
             "$format": "json"})
         found = self.sap.request("GET", "%s?%s" % (SUPPLIER_INVOICES, query))
         return bool(found["d"]["results"])
+
+    def already_billed(self, po_number, item):
+        """What SAP holds as invoiced for this order item, whoever posted it.
+
+        The same reasoning as the duplicate question: a running total kept in
+        one process is gone after a restart, and SAP has it.
+        """
+        query = urllib.parse.urlencode({"$filter": (
+            "PurchaseOrder eq '%s' and PurchaseOrderItem eq '%s'"
+            % (odata_string(po_number), odata_string(item))), "$format": "json"})
+        found = self.sap.request("GET", "%s?%s" % (INVOICED_ORDER_ITEMS, query))
+        return sum((Decimal(row["QuantityInPurchaseOrderUnit"])
+                    for row in found["d"]["results"]), Decimal(0))
+
+    def after_no_answer(self, invoice, po):
+        """Nothing to add: `problems` asks SAP whether it holds the invoice."""
+        return []
 
     def problems(self, invoice, po):
         if self.already_posted(invoice["number"], po["Supplier"]):
