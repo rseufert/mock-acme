@@ -36,6 +36,18 @@ says so where it does.
   of the supplier's mailbox** ([#8]). Each collected the whole mailbox and kept
   what it read, so whichever ran first dropped the other's: no confirmation
   reached SAP, or no invoice did. Each now asks only for the kinds it reads.
+- **An invoice for more than was ordered is blocked** ([#12]). The three-way
+  match compared what was billed with what the ship notice said was shipped,
+  and never with the order, so a supplier that shipped and billed 150 against
+  an order for 100 was posted in full. It now counts what earlier invoices for
+  the same order item have billed as well. No over-delivery tolerance is read:
+  mock-sap's order item carries none, so one unit over is blocked.
+  `InvoiceCheck` counts from its own memory of what it posted;
+  `procure_to_pay.DurableInvoiceCheck` asks SAP.
+- **An invoice taken out of the supplier's mailbox is kept until SAP has dealt
+  with it** ([#13]). If SAP could not be asked about the order, `run` raised
+  and the collected invoices were gone. They now stay in `pending`, and the
+  next run tries again.
 
 ### Changed
 
@@ -43,6 +55,13 @@ says so where it does.
   ([#2]). The items stay `selected`, as before, and the same run can be sent
   again. A different run no longer pays them, because a request that timed
   out may have arrived.
+- **`InvoiceCheck.run` reports a failure to reach SAP instead of raising**
+  ([#13]). A result may now have the status `waiting`: SAP answered with a 5xx
+  or did not answer, and the invoice is kept for the next run. An order SAP
+  does not have is `blocked`. When SAP did not answer the invoice IDoc itself,
+  the invoice may have arrived, so `InvoiceCheck` does not send it again and
+  says so on the next run; `DurableInvoiceCheck` asks SAP whether it holds it
+  and sends it again only if not.
 
 ## [0.1.0] - 2026-10-05
 
@@ -93,3 +112,5 @@ These differ from the last copies the mocks carried.
 [#4]: https://github.com/rseufert/mock-acme/pull/4
 [#6]: https://github.com/rseufert/mock-acme/pull/6
 [#8]: https://github.com/rseufert/mock-acme/issues/8
+[#12]: https://github.com/rseufert/mock-acme/issues/12
+[#13]: https://github.com/rseufert/mock-acme/issues/13
