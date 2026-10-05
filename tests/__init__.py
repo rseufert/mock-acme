@@ -95,6 +95,23 @@ def _stop():
     del _started[:]
 
 
+def another(module, arguments):
+    """One more mock, started differently from the shared one. Returns its URL.
+
+    For a test that needs a mock configured at start-up - mock-edi with
+    `--tax-rate`, say - which a running mock cannot be told afterwards. It is
+    stopped with the rest when the interpreter exits.
+    """
+    port = _free_port()
+    process = subprocess.Popen(
+        [sys.executable, "-m", module, "--port", str(port), "-q"] + list(arguments),
+        stdout=subprocess.DEVNULL)
+    _started.append(process)
+    url = "http://127.0.0.1:%d" % port
+    _wait(module, process, url)
+    return url
+
+
 def _start():
     atexit.register(_stop)
     waiting = []

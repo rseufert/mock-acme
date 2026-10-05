@@ -5,8 +5,16 @@ is posted into SAP (as an inbound INVOIC IDoc) only if
 
     - its prices agree with the purchase order in SAP,
     - it bills no more than the supplier's 856 ship notice said was shipped,
-    - its total adds up, and
+    - its total adds up, tax included, and
     - it has not been posted before.
+
+**Tax is read, not checked.** A supplier that charges sales tax sends it in
+`TXI` segments, and the invoice total is then the lines plus the tax. The match
+adds the tax in before comparing, and SAP is told the net, the tax and the
+gross separately. Whether the *rate* is right is not checked: nothing here
+knows what it should be. Charges and allowances (`SAC`) are not read at all, so
+an invoice that carries one is blocked because it does not add up, and the
+reason says so in those words.
 
 An IDoc SAP accepted is not an invoice SAP posted, so the status record that
 comes back decides: only status 53 counts as posted.
@@ -23,6 +31,8 @@ import http.cookiejar
 import json
 import urllib.request
 from decimal import Decimal
+
+from .po_bridge import x12_quantity
 
 PO_SERVICE = "/sap/opu/odata/sap/API_PURCHASEORDER_PROCESS_SRV"
 
@@ -94,7 +104,8 @@ def send_order(sap, edi_base, po_number, sender, receiver="MOCKEDI", control=1):
     # amounts then match number for number and mean different things, which is
     # what `problems` checks for below.
     body += ["CUR*BY*%s" % (po.get("DocumentCurrency") or "USD")]
-    body += ["PO1*%s*%d*EA*%s**VP*%s" % (i["PurchaseOrderItem"], float(i["OrderQuantity"]),
+    body += ["PO1*%s*%s*EA*%s**VP*%s" % (i["PurchaseOrderItem"],
+                                          x12_quantity(i["OrderQuantity"]),
                                           i["NetPriceAmount"], SUPPLIER_PART[i["Material"]])
              for i in items]
     body += ["CTT*%d" % len(items)]
@@ -126,15 +137,20 @@ def read_856(payload):
 
 
 def read_810(payload):
-    """The invoice as a dict: number, po, date, currency, terms, lines, total.
+    """The invoice as a dict: number, po, date, currency, terms, lines, tax, total.
 
     The three-way match needs only the numbers, but posting the invoice needs
     what it was billed *on*: ``BIG01`` is the invoice date, which becomes the
     payable's baseline and so decides when a payment run picks it up, and the
     net days in ``ITD`` decide the terms. Reading only the match's fields is how
     this example came to post invoices that owed nobody anything.
+
+    ``tax`` is every ``TXI02`` added up: the tax amounts, whichever tax each is
+    and whether it stands in the summary or under a line. ``TDS01`` includes
+    them, so a reader that skips ``TXI`` sees a total its lines do not reach.
     """
-    invoice = {"lines": {}, "date": "", "currency": "", "net_days": None}
+    invoice = {"lines": {}, "date": "", "currency": "", "net_days": None,
+               "tax": Decimal("0.00")}
     for fields in segments(payload):
         if fields[0] == "BIG":
             invoice["date"] = fields[1]
@@ -148,6 +164,9 @@ def read_810(payload):
             invoice["net_days"] = int(net) if net.strip().isdigit() else None
         elif fields[0] == "IT1":
             invoice["lines"][fields[1]] = (Decimal(fields[2]), Decimal(fields[4]))
+        elif fields[0] == "TXI":
+            if len(fields) > 2 and fields[2].strip():
+                invoice["tax"] += Decimal(fields[2])
         elif fields[0] == "TDS":
             invoice["total"] = Decimal(fields[1]) / 100     # two implied decimals
     return invoice
@@ -176,6 +195,11 @@ def invoic_idoc(invoice, po):
         payable's baseline date and so decides when it falls due.
       - ``NETWR`` and ``VGBEL``/``VGPOS`` per item, or the payable's lines carry
         no value and name no purchase order.
+      - ``E1EDS01`` sums. ``010`` is what is owed, tax included. When the
+        invoice carries tax, ``011`` is the net and ``205`` the tax, so that SAP
+        books the expense and the input tax apart instead of expensing the tax.
+        Those three qualifiers are the ones mock-sap reads; they were not
+        checked against a real system's partner profile.
 
     The supplier number comes from the purchase order in SAP, not from the 810:
     the invoice names the supplier by their EDI id (``N1*RE*...*92*MOCKEDI``),
@@ -184,6 +208,12 @@ def invoic_idoc(invoice, po):
     supplier = po["Supplier"]
     currency = invoice.get("currency") or po.get("DocumentCurrency") or "USD"
     terms = TERMS_BY_NET_DAYS.get(invoice.get("net_days"), "")
+    tax = invoice.get("tax") or Decimal("0.00")
+    sums = "<E1EDS01><SUMID>010</SUMID><SUMME>%s</SUMME></E1EDS01>" % invoice["total"]
+    if tax:
+        sums += ("<E1EDS01><SUMID>011</SUMID><SUMME>%s</SUMME></E1EDS01>"
+                 "<E1EDS01><SUMID>205</SUMID><SUMME>%s</SUMME></E1EDS01>"
+                 % (invoice["total"] - tax, tax))
     items = "".join(
         "<E1EDP01><POSEX>%s</POSEX><MENGE>%s</MENGE><VPREI>%s</VPREI>"
         "<NETWR>%s</NETWR><VGBEL>%s</VGBEL><VGPOS>%s</VGPOS>"
@@ -198,10 +228,9 @@ def invoic_idoc(invoice, po):
             "<E1EDK02><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDK02>"
             "<E1EDK03><IDDAT>026</IDDAT><DATUM>%s</DATUM></E1EDK03>"
             "<E1EDKA1><PARVW>LF</PARVW><PARTN>%s</PARTN><LIFNR>%s</LIFNR></E1EDKA1>%s"
-            "<E1EDS01><SUMID>010</SUMID><SUMME>%s</SUMME></E1EDS01>"
-            "</IDOC></INVOIC02>"
+            "%s</IDOC></INVOIC02>"
             % (invoice["number"], currency, terms, invoice["po"], invoice["number"],
-               invoice["date"], supplier, supplier, items, invoice["total"]))
+               invoice["date"], supplier, supplier, items, sums))
 
 
 class InvoiceCheck:
@@ -235,13 +264,25 @@ class InvoiceCheck:
                 found.append("item %s billed at %s, ordered at %s" % (item, price, po_price))
             if qty > shipped.get(item, 0):
                 found.append("item %s bills %s, shipped %s" % (item, qty, shipped.get(item, 0)))
-        if total != invoice["total"]:
-            found.append("lines add up to %s, invoice total is %s" % (total, invoice["total"]))
+        tax = invoice.get("tax") or Decimal("0.00")
+        if total + tax != invoice["total"]:
+            # Said with the tax, or without it when there is none, so that the
+            # reason reads the same as it always did for an untaxed invoice.
+            found.append("lines add up to %s%s, invoice total is %s" % (
+                total, " and tax to %s" % tax if tax else "", invoice["total"]))
         return found
 
     def run(self):
-        """Collect ship notices and invoices; post what matches, block the rest."""
-        docs = [d for d in edi(self.edi_base, "GET", "/_mock/mailbox?partner=%s" % self.our_id)
+        """Collect ship notices and invoices; post what matches, block the rest.
+
+        Collecting from the mailbox takes a document out of it, so only the two
+        kinds this reads are asked for. Asking for the whole mailbox took the
+        supplier's order responses as well and dropped them, and `po_bridge`,
+        reading the same mailbox afterwards, never confirmed the order (#8).
+        """
+        docs = [d for kind in ("despatch", "invoice")
+                for d in edi(self.edi_base, "GET", "/_mock/mailbox?partner=%s&kind=%s"
+                             % (self.our_id, kind))
                 if d["code"] in ("856", "810")]
         for doc in docs:                       # ship notices first: invoices need them
             if doc["code"] == "856":

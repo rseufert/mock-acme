@@ -15,6 +15,7 @@ import http.cookiejar
 import json
 import urllib.error
 import urllib.request
+from decimal import Decimal
 
 PO_SERVICE = "/sap/opu/odata/sap/API_PURCHASEORDER_PROCESS_SRV"
 
@@ -60,6 +61,22 @@ class Sap:
         return self.request("GET", path)["d"]
 
 
+def x12_quantity(raw):
+    """An SAP quantity as an X12 decimal: all of it, and no more than it needs.
+
+    SAP answers `2.500` and `100.000`. X12's `R` type writes the decimal point
+    only when there is a fraction, so those are `2.5` and `100`. This was `%d`
+    of a float, which sent an order for 2.5 as an order for 2: the supplier
+    confirmed, shipped and billed 2, every document agreed with every other,
+    and nothing downstream could notice (#8).
+    """
+    quantity = Decimal(str(raw))
+    # `f`, because `str` writes 1E+2 for a hundred however it was arrived at.
+    if quantity == quantity.to_integral_value():
+        return format(quantity.quantize(Decimal(1)), "f")
+    return format(quantity.normalize(), "f")
+
+
 def build_850(po, sender, receiver, control, now=None):
     """Map an SAP purchase order onto an X12 004010 850."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
@@ -69,8 +86,8 @@ def build_850(po, sender, receiver, control, now=None):
             "CUR*BY*%s" % po["DocumentCurrency"]]
     for item in items:
         # PO101 carries the SAP item number, so the 855 can be matched back
-        body.append("PO1*%s*%d*EA*%s**VP*%s" % (
-            item["PurchaseOrderItem"], float(item["OrderQuantity"]),
+        body.append("PO1*%s*%s*EA*%s**VP*%s" % (
+            item["PurchaseOrderItem"], x12_quantity(item["OrderQuantity"]),
             item["NetPriceAmount"], SUPPLIER_PART[item["Material"]]))
     body.append("CTT*%d" % len(items))
     body.append("SE*%d*0001" % (len(body) + 1))
@@ -135,10 +152,16 @@ class Bridge:
         self.pending until SAP has taken it: an SAP outage delays a
         confirmation instead of losing it.
 
+        Only order responses are collected (`kind=response`). Asking for the
+        whole mailbox took the ship notices and invoices out of it too, and
+        this has no use for them: `invoice_check`, reading the same mailbox
+        afterwards, found nothing to check and no invoice was ever posted (#8).
+
         Returns {po_number: {"lines": ..., "idoc": ..., "exceptions": [...]}}.
         """
         self.pending += [doc for doc in self._edi(
-            "GET", "/_mock/mailbox?partner=%s" % self.our_id) if doc["code"] == "855"]
+            "GET", "/_mock/mailbox?partner=%s&kind=response" % self.our_id)
+            if doc["code"] == "855"]
         results, still_pending = {}, []
         for doc in self.pending:
             po_number = doc["reference"]
