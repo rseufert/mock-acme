@@ -8,6 +8,16 @@ says so where it does.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-10-05
+
+A second payment run before the statement no longer pays an invoice again,
+`invoice_check` is corrected in five places, and `procure_to_pay` ends with the
+supplier told what was paid. The statement posted to SAP also says what the
+next mock-sap release will need it to. **Two behaviours change for a caller**,
+under Changed: read them before upgrading from 0.1.0.
+
 ### Added
 
 - **`ProcureToPay.advise` tells the supplier what was paid** ([#15]). The loop
@@ -29,6 +39,20 @@ says so where it does.
   the release after 0.18.0, where a credit that declares neither reverses
   nothing, so a return that did not say so would no longer reopen its invoice.
   mock-sap up to 0.18.0 ignores the field, and this package works with both.
+
+### Changed
+
+- **A bank that does not answer leaves the run's items held under that run**
+  ([#2]). The items stay `selected`, as before, and the same run can be sent
+  again. A different run no longer pays them, because a request that timed
+  out may have arrived.
+- **`InvoiceCheck.run` reports a failure to reach SAP instead of raising**
+  ([#13]). A result may now have the status `waiting`: SAP answered with a 5xx
+  or did not answer, and the invoice is kept for the next run. An order SAP
+  does not have is `blocked`. When SAP did not answer the invoice IDoc itself,
+  the invoice may have arrived, so `InvoiceCheck` does not send it again and
+  says so on the next run; `DurableInvoiceCheck` asks SAP whether it holds it
+  and sends it again only if not.
 
 ### Fixed
 
@@ -70,20 +94,6 @@ says so where it does.
   with it** ([#13]). If SAP could not be asked about the order, `run` raised
   and the collected invoices were gone. They now stay in `pending`, and the
   next run tries again.
-
-### Changed
-
-- **A bank that does not answer leaves the run's items held under that run**
-  ([#2]). The items stay `selected`, as before, and the same run can be sent
-  again. A different run no longer pays them, because a request that timed
-  out may have arrived.
-- **`InvoiceCheck.run` reports a failure to reach SAP instead of raising**
-  ([#13]). A result may now have the status `waiting`: SAP answered with a 5xx
-  or did not answer, and the invoice is kept for the next run. An order SAP
-  does not have is `blocked`. When SAP did not answer the invoice IDoc itself,
-  the invoice may have arrived, so `InvoiceCheck` does not send it again and
-  says so on the next run; `DurableInvoiceCheck` asks SAP whether it holds it
-  and sends it again only if not.
 
 ## [0.1.0] - 2026-10-05
 
@@ -127,6 +137,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.2.0]: https://github.com/rseufert/mock-acme/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rseufert/mock-acme/releases/tag/v0.1.0
 [#1]: https://github.com/rseufert/mock-acme/pull/1
 [#2]: https://github.com/rseufert/mock-acme/issues/2
