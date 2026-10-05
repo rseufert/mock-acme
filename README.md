@@ -18,6 +18,7 @@ released mocks, kept in one place so that there is one copy of each.
 | `mockacme.invoice_check` | the supplier's 856 and 810, matched to the order, posted as an INVOIC IDoc or blocked | SAP, supplier |
 | `mockacme.pay_invoices` | a supplier's 810s, paid as a pain.001 and followed to the statement | supplier, bank |
 | `mockacme.payment_run` | SAP's open items, paid as a pain.001 or a NACHA file, cleared by posting the statement as a FINSTA01 | SAP, bank |
+| `mockacme.remittance` | SAP's payment advice (a PEXR2002 it generates) out as an 820, and what the supplier made of it | SAP, supplier |
 | `mockacme.procure_to_pay` | one purchase from the order to the cleared payment | all three |
 
 `mockacme.bank_messages` is what the two payment modules share: the call to the
@@ -62,7 +63,8 @@ has a way to tell the two apart
 ## Where the code came from
 
 The modules were copied on 2026-10-04 from the `examples/` folder of the mock
-each was written beside, with their tests. Nothing in them changed but imports,
+each was written beside, with their tests; `remittance` was written there
+afterwards and followed on 2026-10-05. Nothing in them changed but imports,
 the lines saying how to run the tests, and issue references, which now name the
 repository they belong to.
 
@@ -70,6 +72,7 @@ repository they belong to.
 | --- | --- | --- |
 | `po_bridge`, its tests | mock-edi `examples/` | `0e86279` (0.7.0) |
 | `invoice_check`, its tests | mock-sap `examples/` | `0ea524d` |
+| `remittance`, its tests | mock-sap `examples/` | `73055a2` |
 | `bank_messages`, `pay_invoices`, `payment_run`, `procure_to_pay`, their tests | mock-bank `examples/` | `fd618e6` (0.7.0) |
 
 The originals are still in those repositories. Until they are removed there,

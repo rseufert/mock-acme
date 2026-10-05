@@ -70,7 +70,7 @@ jobs:
           python -m venv /tmp/wheel
           /tmp/wheel/bin/pip install dist/*.whl
           cd /tmp
-          /tmp/wheel/bin/python -c "import mockacme.procure_to_pay, mockacme.po_bridge, mockacme.pay_invoices; print(mockacme.__version__)"
+          /tmp/wheel/bin/python -c "import mockacme.procure_to_pay, mockacme.po_bridge, mockacme.pay_invoices, mockacme.remittance; print(mockacme.__version__)"
           test "$(/tmp/wheel/bin/pip list --format=freeze | grep -vicE '^(pip|setuptools|wheel|mock-acme)==')" = "0"
 
   # The one check `main` requires (docs/GITHUB.md). Its name is load-bearing:

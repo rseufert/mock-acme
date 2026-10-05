@@ -33,9 +33,9 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# mock-sap 0.13.2 is a real floor: before it the INVOIC procure_to_pay sends
-# created no payable. The other two carry no floor anyone has found.
-test = ["mock-sap>=0.13.2", "mock-edi", "mock-bank"]
+# mock-sap 0.17.0 is a real floor: it is the first that generates the payment
+# advice `remittance` converts. The other two carry no floor anyone has found.
+test = ["mock-sap>=0.17.0", "mock-edi", "mock-bank"]
 
 [project.urls]
 Repository = "https://github.com/rseufert/mock-acme"
