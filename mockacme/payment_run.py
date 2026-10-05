@@ -88,6 +88,10 @@ OPEN_SUPPLIER_ITEMS = ("AccountingDocumentItemType eq 'K' and "
                        "ClearingAccountingDocument eq '' and "
                        "PaymentBlockingReason eq ''")
 
+# What a credit line on a FINSTA01 declares itself to be, in `E1IDPF1-LINACTION`
+# (mock-sap#89): a payment of ours coming back, or money arriving.
+RETURNED, RECEIVED = "RET", "RCV"
+
 # Payment methods this run pays by transfer. Blank is the supplier's default,
 # which is what an inbound INVOIC posts with.
 TRANSFER = {"", "T"}
@@ -857,15 +861,23 @@ class PaymentRun:
         the structured `E1EDP02`, which is matched exactly, rather than only in
         the note to payee.
 
-        **Money arriving is written without its reference** (#2). SAP reads a
-        credit that quotes a cleared invoice as that payment coming back, and
-        reopens the invoice; the next run then pays it a second time. The
-        FINSTA01 as agreed has no field saying which kind of credit a line is,
-        so the one thing that would mislead SAP is left out, and
+        **A credit says which kind it is** (#18). Money in has two readings
+        that are opposites - a payment of ours coming back, which reopens the
+        invoice it paid, and money arriving, which reverses nothing - and the
+        sign cannot tell them apart. Each credit line carries `LINACTION`:
+        `RET` for a return, `RCV` for a receipt. mock-sap reads it from the
+        release after 0.18.0 (mock-sap#89), where a credit that declares
+        neither reverses nothing; up to 0.18.0 the field is ignored and any
+        credit quoting a cleared invoice reopens it.
+
+        **Money arriving is still written without its reference** (#2), for
+        that second kind of mock-sap. The reference is the one thing that
+        would make it reopen an invoice, so it is left out, and
         `post_statement` says so as a problem. The line is still there with its
-        amount, so the statement adds up. This is a stopgap until the two sides
-        agree a way to say it (mock-sap#89), and it is what has to change when
-        SAP clears receivables (mock-sap#65), which need that reference.
+        amount, so the statement adds up. Against a mock-sap that reads
+        `LINACTION` this is no longer needed, and it is what has to go when SAP
+        clears receivables (mock-sap#65), which need that reference. It stays
+        until this package requires such a mock-sap.
 
         The currency is the statement's own, on every amount and on the
         account. It was `EUR` whatever the account held, and a dollar statement
@@ -885,9 +897,12 @@ class PaymentRun:
             reference = "" if received(line) else (
                 "<E1EDP02 SEGMENT=\"1\"><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDP02>"
                 % escape(line["end_to_end_id"]))
+            # Not on a debit: money out has one reading, and SAP does not look.
+            action = "" if line["side"] != "CRDT" else (
+                "<LINACTION>%s</LINACTION>" % (RETURNED if line["returned"] else RECEIVED))
             body.append(
-                "<E1IDPF1 SEGMENT=\"1\"><LINLINEIT>%06d</LINLINEIT>%s%s</E1IDPF1>"
-                % (position, reference,
+                "<E1IDPF1 SEGMENT=\"1\"><LINLINEIT>%06d</LINLINEIT>%s%s%s</E1IDPF1>"
+                % (position, action, reference,
                    amounts(("001", signed(line["amount"], line["side"])))))
         debits = sum((Decimal(e["amount"]) for e in lines if e["side"] == "DBIT"), Decimal(0))
         credits = sum((Decimal(e["amount"]) for e in lines if e["side"] == "CRDT"), Decimal(0))
