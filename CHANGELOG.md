@@ -8,7 +8,11 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing has been released yet. This is what the first release will carry.
+Nothing yet.
+
+## [0.1.0] - 2026-10-05
+
+The first release.
 
 ### Added
 
@@ -48,6 +52,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.1.0]: https://github.com/rseufert/mock-acme/releases/tag/v0.1.0
 [#1]: https://github.com/rseufert/mock-acme/pull/1
 [#2]: https://github.com/rseufert/mock-acme/issues/2
 [#3]: https://github.com/rseufert/mock-acme/pull/3
