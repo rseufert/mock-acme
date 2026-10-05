@@ -32,6 +32,12 @@ Changed: read them before upgrading from 0.1.0.
   builds. Without this the register kept in a file, which is the one a
   restarted middleware needs, could not be had through `ProcureToPay` at all.
   Left out, it is in memory as before.
+- **A credit on the statement posted to SAP says which kind it is** ([#18]).
+  `payment_run` writes `LINACTION` on each credit line of the `FINSTA01`: `RET`
+  for a payment coming back, `RCV` for money arriving. mock-sap reads it from
+  the release after 0.18.0, where a credit that declares neither reverses
+  nothing, so a return that did not say so would no longer reopen its invoice.
+  mock-sap up to 0.18.0 ignores the field, and this package works with both.
 
 ### Changed
 
@@ -141,3 +147,4 @@ These differ from the last copies the mocks carried.
 [#12]: https://github.com/rseufert/mock-acme/issues/12
 [#13]: https://github.com/rseufert/mock-acme/issues/13
 [#15]: https://github.com/rseufert/mock-acme/issues/15
+[#18]: https://github.com/rseufert/mock-acme/issues/18
