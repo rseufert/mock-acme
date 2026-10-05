@@ -81,6 +81,20 @@ stopgap, said as a problem on the run each time it happens, until the FINSTA01
 has a way to tell the two apart
 ([mock-sap#89](https://github.com/rseufert/mock-sap/issues/89)).
 
+## Releasing
+
+Not released yet. When it is, a release is the same three acts as in the mocks,
+by one person in one sitting: merge a pull request that sets `version` in
+`pyproject.toml` and `__version__` in `mockacme/__init__.py` and dates the
+section in [`CHANGELOG.md`](CHANGELOG.md); tag that commit `v<version>`; publish
+a GitHub Release from the tag. Publishing the Release runs
+[`publish.yml`](.github/workflows/publish.yml), which runs the tests, builds,
+refuses a tag that disagrees with the package, and uploads to PyPI through
+Trusted Publishing. Running that workflow by hand uploads to TestPyPI instead.
+
+There is no `tools/release.py` here as there is in the mocks: the steps are done
+by hand, and CI checks only that the two places the version is written agree.
+
 ## Where the code came from
 
 The modules were copied on 2026-10-04 from the `examples/` folder of the mock
@@ -96,7 +110,8 @@ repository they belong to.
 | `remittance`, its tests | mock-sap `examples/` | `73055a2` |
 | `bank_messages`, `pay_invoices`, `payment_run`, `procure_to_pay`, their tests | mock-bank `examples/` | `fd618e6` (0.7.0) |
 
-The originals are still in those repositories. Until they are removed there,
-this is a third copy and not yet the only one.
+The originals were removed from those repositories on 2026-10-05, and each
+left an `examples/README.md` saying which file became which. This is the only
+copy.
 
 The repository's settings are described in [docs/GITHUB.md](docs/GITHUB.md).
