@@ -39,6 +39,13 @@ a port the operating system chose, and stops them afterwards.
 [`tests/__init__.py`](tests/__init__.py) says how to point the tests at a mock
 that is already running, which is how they are run against a mock's `main`.
 
+`tests/test_payment_run_readers.py` is the one test that imports a mock rather
+than talking to it: it gives `payment_run`'s hand-written statement readers the
+same statement mock-bank wrote as a `camt.053` and as BAI2, and five BAI2 files
+from [moov-io/bai2](https://github.com/moov-io/bai2), and holds them to
+mock-bank's own reader. The samples and their licence are in
+[`tests/samples/external/`](tests/samples/external/SOURCES.md).
+
 `payment_run` pays by ACH as well. The same tests in that mode:
 
 ```bash
