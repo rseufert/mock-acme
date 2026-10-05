@@ -79,12 +79,23 @@ python3 -m pip install \
 
 ## Known to be wrong
 
-`payment_run` can pay an invoice twice: a second run started before the bank's
-statement has been posted selects the same invoice again, and the bank pays it
-again. SAP offers no state between open and cleared for a run to write
-([mock-sap#90](https://github.com/rseufert/mock-sap/issues/90)), so this is not
-fixed, and `tests/test_payment_run.py` has a test that says so. It is tracked
-in [#2](https://github.com/rseufert/mock-acme/issues/2).
+SAP has no state between open and cleared
+([mock-sap#90](https://github.com/rseufert/mock-sap/issues/90)), so an invoice a
+payment run has sent to the bank still looks open to the next run. `payment_run`
+keeps its own record instead: a `Register` of what it has sent, written before
+the file goes out, which a later run reads and leaves those items alone until
+the bank refuses the payment or SAP clears it
+([#2](https://github.com/rseufert/mock-acme/issues/2)).
+
+That is one company's own record and not SAP's, and it has edges:
+
+- `PaymentRun(...)` with no `register` keeps it in memory, which covers that
+  object's runs and nothing else. A payment program that is started again each
+  day has to pass `register=Register(path)`.
+- Two installations with two registers pay twice, and so do two processes
+  writing one file at the same moment. Nothing here locks it.
+- Whoever posts the statements needs the same register, or its entries are
+  never let go.
 
 Money arriving is posted to SAP without the reference it quotes, so that SAP
 does not take it for a returned payment and reopen an invoice. That is a

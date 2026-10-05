@@ -17,7 +17,7 @@ not own so that code like this can be tested; this is that code. It talks to
 them over HTTP and imports none of them.
 
 It is a reference, not a client library to put in front of real money:
-`payment_run` can still pay an invoice twice, in the way rseufert/mock-acme#2
-says. Standard library only.
+`payment_run` keeps its own record of what it has sent, because SAP has nowhere
+to put it, and its README says where that stops being enough. Standard library only.
 """
 __version__ = "0.1.0"

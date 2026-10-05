@@ -8,7 +8,27 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A second payment run before the statement no longer pays the same invoice
+  again** ([#2]). `payment_run` keeps a `Register` of what it has sent to the
+  bank, written before the file goes out. A later run skips an item another
+  run holds and says which run has it; the run that holds it may still send
+  its own file again. An item is let go when the bank refuses the payment or
+  SAP clears it from a statement, so a payment that comes back is open to the
+  next run as before.
+  `PaymentRun(..., register=Register(path))` keeps the register in a file.
+  **Without `register` it is kept in memory**, which protects one
+  `PaymentRun` object and no other process. It is the caller's own record, not
+  SAP's: rseufert/mock-sap#90 is still the fix for two installations, or two
+  processes at once.
+
+### Changed
+
+- **A bank that does not answer leaves the run's items held under that run**
+  ([#2]). The items stay `selected`, as before, and the same run can be sent
+  again. A different run no longer pays them, because a request that timed
+  out may have arrived.
 
 ## [0.1.0] - 2026-10-05
 

@@ -39,6 +39,12 @@ What it gets right that is easy to get wrong:
   entries must be the closing balance, to the cent. When it is not, the
   difference is a payment the statement left out; the accepted payment for
   exactly that amount is reported as unreconciled, and its item stays open.
+- **An item is paid by one run at a time.** SAP has no state between open
+  and cleared (mock-sap#90), so an item this company has already instructed a
+  bank to pay still looks open to the next selection. The run keeps a
+  `Register` of what it has sent, written before the file goes out, and a
+  later run leaves those items alone until the bank refuses the payment or
+  SAP clears it. See `Register` for what that does and does not promise.
 - **Accepted is not paid.** An item is paid when a statement shows the debit
   and SAP clears it. A payment made after the cutoff is on the next business
   day's statement, not today's, and until then it is simply still accepted.
@@ -57,6 +63,7 @@ from __future__ import annotations
 import datetime
 import http.cookiejar
 import json
+import os
 import re
 import urllib.error
 import urllib.parse
@@ -134,6 +141,96 @@ def sap_date(raw: str) -> Optional[datetime.date]:
             + datetime.timedelta(milliseconds=int(found.group()))).date()
 
 
+class Register:
+    """What has been sent to a bank and is not yet settled: the in-payment state.
+
+    SAP's open-item list cannot say "selected for payment" (mock-sap#90). Until
+    it can, the only place that fact can live is with whoever did the paying,
+    and it has to outlive the `Run` object, or a second run started before the
+    statement arrives pays the same invoice again (#2).
+
+    One entry per open item, keyed by `company code/fiscal year/accounting
+    document`, saying which run's file carries it. An entry is written **before**
+    the file is sent, so that a crash between the two leaves an item held back
+    rather than free to be paid twice. It goes when one of two things is known:
+
+    - the bank refused the payment, so no money moved and the item is owed;
+    - SAP cleared the item from a statement. If that payment later comes back,
+      SAP reopens the item, and it is open to the next run as it should be.
+
+    Anything else leaves it held: accepted and not yet on a statement, a
+    statement that did not add up, a bank that never answered. **A held item is
+    not paid again by a different run**, and that run says which run holds it.
+    The run that holds it may send its file again, because the bank knows that
+    file and refuses a copy. An entry nothing will ever resolve - the bank lost
+    the file, say - is for a person to `release`.
+
+    `Register(path)` keeps the entries in a JSON file, rewritten whole and
+    swapped into place on every change. `Register()` keeps them in memory, which
+    protects one process and nothing else: **a payment program that is started
+    again each day needs a path.**
+
+    What this does not do. It is one company's own record, not SAP's: a second
+    installation with a second register pays twice, and so do two processes
+    writing one file at the same moment, which nothing here locks. Whoever posts
+    the statements has to be given the same register, or its entries are never
+    cleared. mock-sap#90 is the fix for all three.
+    """
+
+    def __init__(self, path: Optional[str] = None):
+        self.path = path
+        self.entries: Dict[str, Dict[str, str]] = {}
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                stored = json.load(handle)
+            if stored.get("version") != 1:
+                # Not guessed at: an entry misread is an invoice paid twice or
+                # never, and neither is found until a supplier calls.
+                raise ValueError("%s is not a payment register this version reads: "
+                                 "its version is %r, not 1" % (path, stored.get("version")))
+            self.entries = stored["in_payment"]
+
+    def holder(self, document: str) -> Optional[Dict[str, str]]:
+        """The entry holding this open item, or None when it is free to pay."""
+        return self.entries.get(document)
+
+    def hold(self, items: List["Item"], run: "Run") -> None:
+        """Record that `run`'s file carries these items. Call before sending."""
+        for item in items:
+            self.entries[item.document] = {
+                "msg_id": run.msg_id, "run_on": run.run_on.isoformat(),
+                "reference": item.reference, "amount": item.amount,
+                "currency": item.currency}
+        self.save()
+
+    def release(self, document: str) -> bool:
+        """Forget an item, so that the next run may pay it. True if it was held.
+
+        `document` is the full key, or the accounting document number alone,
+        which is all SAP gives back when it clears from a statement.
+        """
+        held = [key for key in self.entries
+                if key == document or key.rsplit("/", 1)[-1] == document]
+        for key in held:
+            del self.entries[key]
+        if held:
+            self.save()
+        return bool(held)
+
+    def save(self) -> None:
+        if not self.path:
+            return
+        # Written beside the file and swapped in, so that a crash half way
+        # through leaves the old register rather than half of the new one.
+        scratch = self.path + ".writing"
+        with open(scratch, "w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "in_payment": self.entries}, handle,
+                      indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(scratch, self.path)
+
+
 @dataclass
 class Item:
     """One open item, and what became of it."""
@@ -204,10 +301,17 @@ class PaymentRun:
     A NACHA account's statement may be BAI2 rather than a `camt.053`, and the
     reason an ACH payment came back is in the bank's NACHA return file:
     `reconcile` reads all three into the same statement (mock-bank#57).
+
+    `register` is where the run records what it has sent, so that the next run
+    does not pay it again (#2). Give every `PaymentRun` that pays from or
+    reconciles the same account the same one.
     """
 
     def __init__(self, sap: str, bank: str, company: Dict[str, str],
-                 file_format: str = "iso20022"):
+                 file_format: str = "iso20022", register: Optional[Register] = None):
+        # In memory unless told otherwise, which covers this object's own runs
+        # and no others. `Register` says why a real one is given a path.
+        self.register = register if register is not None else Register()
         self.sap = sap
         self.bank = bank
         self.company = company
@@ -239,9 +343,26 @@ class PaymentRun:
             # like a day with nothing due.
             run.problems.append(unanswered("SAP", "no open item was selected", error))
             return run
+        self.hold_back(run)
         self.send(run)
         self.read_status(run)
         return run
+
+    def hold_back(self, run: Run) -> None:
+        """Leave alone what another run has already sent to the bank (#2).
+
+        SAP still lists the item as open, because nothing clears it until the
+        statement is posted. The run that holds it is not held back from its
+        own items: sending its file again is how a run that got no answer finds
+        out whether the bank has it, and the bank refuses a copy.
+        """
+        for item in run.items:
+            held = self.register.holder(item.document)
+            if item.status == "selected" and held and held["msg_id"] != run.msg_id:
+                item.status = "skipped"
+                item.reason = ("in payment: %s carried it to the bank on %s and it "
+                               "has not been cleared or refused since"
+                               % (held["msg_id"], held["run_on"]))
 
     def nacha_refusal(self, identification: str) -> str:
         """Why this run cannot be a NACHA file from this company, or "".
@@ -368,13 +489,17 @@ class PaymentRun:
         paying = [i for i in run.items if i.status == "selected"]
         if not paying:
             return
+        # Before the file goes, not after: see `Register`.
+        self.register.hold(paying, run)
         run.http_status, body = call(
             self.bank, "POST", "/payments",
             self.nacha_file(run, paying) if self.nacha else self.payment_file(run, paying),
             "text/plain" if self.nacha else "application/xml")
         if run.http_status == NO_ANSWER:
-            # The file did not reach the bank, so nothing was sent: every item
-            # stays selected, for the same run to be sent again.
+            # Nothing came back, so every item stays selected, for the same run
+            # to be sent again. The register keeps them under this run all the
+            # same: a request that timed out may have arrived, and a different
+            # run paying these now would be the second payment.
             run.problems.append("the bank did not answer, so the payment file was "
                                 "not sent: %s" % body.decode("utf-8", "replace"))
             return
@@ -472,7 +597,16 @@ class PaymentRun:
         mailbox for whatever reconciles the statement.
         """
         if self.nacha:
-            return self.read_acknowledgement(run)
+            self.read_acknowledgement(run)
+        else:
+            self.read_status_reports(run)
+        # A payment the bank refused moved no money, so the item is owed and
+        # free for the next run. Everything else stays held.
+        for item in run.paying():
+            if item.status == "rejected":
+                self.register.release(item.document)
+
+    def read_status_reports(self, run: Run) -> None:
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=pain.002")
         if status != 200:
             run.problems.append("the bank's mailbox %s, so no status report was read"
@@ -667,6 +801,11 @@ class PaymentRun:
             return by_document.get(document)
 
         for line in record["cleared"]:
+            # SAP's own list now says the item is paid, so the register's entry
+            # has done its work - whichever run sent it, which is why this goes
+            # by SAP's document number and not by this run's items.
+            if line.get("ACCOUNTINGDOCUMENT"):
+                self.register.release(line["ACCOUNTINGDOCUMENT"])
             item = attributed(line, "cleared")
             if item is not None and item.status == "accepted":
                 item.status, item.reason = "cleared", line["CLEARINGDOCUMENT"]
