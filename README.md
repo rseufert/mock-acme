@@ -27,7 +27,18 @@ bank and the reading of its ISO 20022 answers.
 Every module talks to the mocks over HTTP and imports none of them. The package
 has no dependencies.
 
+## Installing
+
+```bash
+python3 -m pip install mock-acme
+```
+
+That installs the package and nothing else. The mocks it talks to are separate:
+`pip install mock-sap mock-edi mock-bank`.
+
 ## Running the tests
+
+From a checkout:
 
 ```bash
 python3 -m pip install -e ".[test]"
@@ -83,7 +94,7 @@ has a way to tell the two apart
 
 ## Releasing
 
-Not released yet. When it is, a release is the same three acts as in the mocks,
+A release is the same three acts as in the mocks,
 by one person in one sitting: merge a pull request that sets `version` in
 `pyproject.toml` and `__version__` in `mockacme/__init__.py` and dates the
 section in [`CHANGELOG.md`](CHANGELOG.md); tag that commit `v<version>`; publish

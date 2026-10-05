@@ -20,4 +20,4 @@ It is a reference, not a client library to put in front of real money:
 `payment_run` can still pay an invoice twice, in the way rseufert/mock-acme#2
 says. Standard library only.
 """
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
