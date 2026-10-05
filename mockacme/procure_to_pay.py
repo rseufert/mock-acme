@@ -8,6 +8,7 @@ exists for what only appears between them:
     SAP ◀──INVOIC──                (matched, posted, and now owed)
         ──pain.001──▶ bank         (a payment run selects what is due)
     SAP ◀──FINSTA01◀──camt.053──   (the statement clears what was paid)
+    SAP ──PEXR2002──▶ 820 ──▶ supplier   (and the supplier is told what for)
 
 Each pair of mocks can be correct on its own while the chain is broken, because
 each pair's tests assert what the *next* system received rather than what it
@@ -29,11 +30,16 @@ payment and reconciliation are `payment_run.PaymentRun`, which lives here. The
 only logic of its own is `DurableInvoiceCheck`, and that is the point of the
 duplicate scenario below.
 
-**What it does not do.** It does not tell the supplier what was paid: that needs
-a remittance advice (X12 820 or EDIFACT `REMADV`), which mock-edi does not speak
-yet (mock-edi#149). So the loop ends with SAP and the bank agreeing and the
-supplier none the wiser, which is exactly why a supplier keeps dunning you for an
-invoice you paid. Saying so is better than implying the circle closes.
+**The loop closes with the supplier told.** SAP and the bank agreeing is not the
+end of a purchase: a supplier who is paid and not told what for keeps dunning
+for the invoice. `advise` asks SAP for the payment advice of each payment a run
+cleared and sends it on as an X12 820 (`remittance`), and the supplier says
+whether it agrees.
+
+**What it does not do.** It does not tell the supplier when a payment it was
+told about comes back. The bank returning a payment reopens the invoice in SAP,
+and the supplier still holds an advice saying it was paid; the correction is a
+reversing 820, which nothing here sends.
 
 Stdlib only. The tests are in tests/test_procure_to_pay.py.
 """
@@ -46,6 +52,7 @@ from typing import Dict, List, Optional
 
 from . import invoice_check
 from . import payment_run
+from . import remittance
 
 SUPPLIER_INVOICES = ("/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV"
                      "/A_SupplierInvoice")
@@ -201,3 +208,36 @@ class ProcureToPay:
 
     def reconcile(self, run) -> None:
         self.payments.reconcile(run)
+
+    # -- 4. tell the supplier --------------------------------------------------
+
+    def advise(self, run, sender: str, control: int) -> List[dict]:
+        """Tell the supplier what each payment this run cleared was for, as an 820.
+
+        One advice per payment document, not per invoice: SAP pays a supplier's
+        invoices from one statement with one document, and its advice names
+        every invoice that document settled. Only what SAP has cleared is
+        advised. An accepted payment is not yet on a statement, and telling the
+        supplier about money the bank has not moved is the mistake the
+        supplier's own timing rule exists to catch.
+
+        `control` is the first interchange control number to use; each advice
+        takes the next. Returns what `remittance.tell_the_supplier` returns for
+        each: what SAP generated, the 820, and what the supplier made of it,
+        disagreements included. They are returned rather than raised, because
+        the supplier disagreeing is an answer, not a failure to send.
+
+        **The supplier judges the date by its own clock.** The advice carries
+        the day the payment settled, which is the bank's day. A supplier whose
+        clock is behind the bank's reads that as an advice for money that has
+        not arrived yet, and says so.
+        """
+        # A cleared item's `reason` is the clearing document SAP posted for it
+        # (`PaymentRun.post_statement`). Kept in the order the run paid them.
+        documents: List[str] = []
+        for item in run.items:
+            if item.status == "cleared" and item.reason not in documents:
+                documents.append(item.reason)
+        return [remittance.tell_the_supplier(self.sap, self.edi, document, sender,
+                                             control=control + offset)
+                for offset, document in enumerate(documents)]

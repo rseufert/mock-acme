@@ -19,7 +19,7 @@ released mocks, kept in one place so that there is one copy of each.
 | `mockacme.pay_invoices` | a supplier's 810s, paid as a pain.001 and followed to the statement | supplier, bank |
 | `mockacme.payment_run` | SAP's open items, paid as a pain.001 or a NACHA file, cleared by posting the statement as a FINSTA01 | SAP, bank |
 | `mockacme.remittance` | SAP's payment advice (a PEXR2002 it generates) out as an 820, and what the supplier made of it | SAP, supplier |
-| `mockacme.procure_to_pay` | one purchase from the order to the cleared payment | all three |
+| `mockacme.procure_to_pay` | one purchase from the order to the cleared payment, and the supplier told what it was for | all three |
 
 `mockacme.bank_messages` is what the two payment modules share: the call to the
 bank and the reading of its ISO 20022 answers.
