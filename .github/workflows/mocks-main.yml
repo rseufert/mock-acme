@@ -1,0 +1,53 @@
+name: Mocks' main
+
+# The tests again, against each mock's `main` instead of its release.
+#
+# `ci.yml` installs the mocks from PyPI, so it learns that a mock changed under
+# this code only after that change has been published. This learns the night it
+# is merged. mock-sap began checking a statement line's currency
+# (rseufert/mock-sap#88) while this repository still wrote EUR on every
+# statement: against the release everything passed, against `main` four tests
+# of the ACH payment run failed.
+#
+# It is not a required check and does not run on pull requests. What it reports
+# is the state of three other repositories, and a pull request here should not
+# go red for a change somebody merged there.
+on:
+  schedule:
+    # 05:17 UTC, off the hour: GitHub delays scheduled runs at the top of one
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mocks-main
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests against the mocks' main
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install this package, and each mock from its main branch
+        run: |
+          python -m pip install -e .
+          python -m pip install \
+            "mock-sap @ git+https://github.com/rseufert/mock-sap@main" \
+            "mock-edi @ git+https://github.com/rseufert/mock-edi@main" \
+            "mock-bank @ git+https://github.com/rseufert/mock-bank@main"
+      # The commit each mock was built from is in this output, after the `@`.
+      - name: Say which commits these are
+        run: python -m pip freeze
+      - name: Run the tests against the mocks' main
+        run: python -X faulthandler -m unittest discover -s tests -t . -v
+      - name: Run the payment run again, paying by ACH
+        env:
+          PAYMENT_RUN_FORMAT: nacha
+        run: python -X faulthandler -m unittest -v tests.test_payment_run

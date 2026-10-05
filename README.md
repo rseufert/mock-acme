@@ -44,6 +44,20 @@ that is already running, which is how they are run against a mock's `main`.
 PAYMENT_RUN_FORMAT=nacha python3 -m unittest -v tests.test_payment_run
 ```
 
+The released mocks are what a pull request is tested against. A second
+workflow, [`mocks-main.yml`](.github/workflows/mocks-main.yml), runs the same
+tests every night against each mock's `main`, so that a change merged there
+which breaks this code is seen before it is released. It is not a required
+check; a red run there says something about another repository. To do the same
+by hand:
+
+```bash
+python3 -m pip install \
+  "mock-sap @ git+https://github.com/rseufert/mock-sap@main" \
+  "mock-edi @ git+https://github.com/rseufert/mock-edi@main" \
+  "mock-bank @ git+https://github.com/rseufert/mock-bank@main"
+```
+
 ## Known to be wrong
 
 `payment_run` can pay an invoice twice: a second run started before the bank's
