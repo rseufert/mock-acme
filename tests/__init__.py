@@ -43,7 +43,13 @@ MOCKS = (
     ("BANK_URL", "mockbank", ["-q", "--clock", BANK_CLOCK]),
 )
 
-STARTUP_SECONDS = 20
+# Long, because of mock-sap alone. `HTTPServer.server_bind` reverse-resolves the
+# address it bound to, and on a host whose resolver is slow to say no - GitHub's
+# macOS runners are - that lookup took more than 20 seconds before mock-sap
+# 0.16.0 answered its first request. mock-edi and mock-bank skip the lookup and
+# are up in well under a second. A mock that has exited is noticed at once, so
+# the wait is only ever spent on one that is still coming.
+STARTUP_SECONDS = 120
 
 _started = []
 
