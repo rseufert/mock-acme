@@ -18,6 +18,7 @@ to the open-item cube, which is read-only in SAP and in mock-sap.
 import datetime
 import json
 import os
+import re
 import socket
 import unittest
 import unittest.mock
@@ -397,6 +398,151 @@ class AReturnedPayment(StatementCase):
                          ["GLX-4711", "INI-2026-17"])
 
 
+class MoneyArriving(StatementCase):
+    """#2: a credit that quotes a paid invoice is not that payment coming back.
+
+    A customer pays ACME and quotes, by mistake or by coincidence, the number of
+    an invoice ACME has already paid a supplier. On the statement it is a
+    credit with that reference, which is also what a returned payment is. Read
+    as a return, the invoice reopens and the next run pays the supplier twice.
+    """
+
+    def receive(self, reference, minor_units):
+        return control(BANK, "POST", "/_mock/credits", {
+            "account": "ACME", "amount": minor_units, "currency": CURRENCY,
+            "end_to_end_id": reference, "note": reference,
+            "debtor": {"name": "A Customer Ltd", "iban": "DE89370400440532013000",
+                       "bic": "COBADEFFXXX"}})
+
+    def test_a_credit_quoting_a_paid_invoice_leaves_it_paid(self):
+        self.post_two()
+        run = self.pay_on_monday()
+        self.payments.reconcile(run)
+        cleared_by = self.clearing("GLX-4711")
+        self.assertNotEqual(cleared_by, "")
+        credit = self.receive("GLX-4711", 119000)
+        self.advance(datetime.date.fromisoformat(credit["booking_date"])
+                     + datetime.timedelta(days=1))
+        self.payments.reconcile(run)
+        # The credit reached SAP: the statement it is on adds up, and nothing
+        # on it was taken for a return.
+        carrying = [s for s in run.statements if s["date"] == credit["booking_date"]]
+        self.assertEqual(len(carrying), 1)
+        self.assertTrue(carrying[0]["adds_up"])
+        self.assertIn("<MOABETR>1190.00</MOABETR>", carrying[0]["finsta"])
+        self.assertEqual(carrying[0]["reopened"], [])
+        # Still paid, in SAP and in the run, and not owed to the next run.
+        self.assertEqual(self.clearing("GLX-4711"), cleared_by)
+        self.assertEqual(self.by_reference(run)["GLX-4711"].status, "cleared")
+        self.assertEqual(self.payments.select(self.bank_today()), [])
+        # And said out loud, because the reference was withheld from SAP.
+        said = [p for p in run.problems if "GLX-4711" in p]
+        self.assertEqual(len(said), 1, run.problems)
+        self.assertIn("money arriving", said[0])
+        self.assertIn("1190.00", said[0])
+
+    def test_a_return_beside_money_arriving_still_reopens_its_invoice(self):
+        # The other half: telling the two apart must not stop a real return.
+        control(BANK, "PATCH", "/_mock/accounts/ACME", {
+            "behaviour": "return-later",
+            "parameters": {"end_to_end_id": "UMB-0815", "days": 3, "reason": CLOSED}})
+        self.post_two()
+        run = self.pay_on_monday()
+        self.payments.reconcile(run)
+        self.receive("GLX-4711", 119000)
+        self.advance(self.monday + datetime.timedelta(days=4))
+        self.payments.reconcile(run)
+        items = self.by_reference(run)
+        self.assertEqual((items["GLX-4711"].status, items["UMB-0815"].status),
+                         ("cleared", "returned"))
+        self.assertTrue(items["UMB-0815"].reason.startswith(CLOSED), items["UMB-0815"].reason)
+        self.assertEqual([i.reference for i in self.payments.select(self.bank_today())],
+                         ["UMB-0815"])
+
+
+class TheStatementsCurrency(StatementCase):
+    """#2: the FINSTA01 says the currency the statement is in, not `EUR`."""
+
+    def test_every_amount_and_the_account_carry_the_accounts_currency(self):
+        self.post_two()
+        run = self.pay_on_monday()
+        self.payments.reconcile(run)
+        self.assertTrue(run.statements)
+        for statement in run.statements:
+            written = set(re.findall(r"<(?:CUXWAERZ|FIIKWAER)>([^<]*)<", statement["finsta"]))
+            self.assertEqual(written, {CURRENCY}, statement["number"])
+        # Nothing was lost by saying so: both invoices cleared.
+        self.assertEqual({i.status for i in run.items}, {"cleared"})
+
+    def test_a_statement_that_names_no_currency_is_not_posted(self):
+        camt = ('<?xml version="1.0"?><Document xmlns="urn:iso:std:iso:20022:tech:xsd:'
+                'camt.053.001.08"><BkToCstmrStmt><Stmt><ElctrncSeqNb>7</ElctrncSeqNb>'
+                '<FrToDt><FrDtTm>2026-10-05T00:00:00+00:00</FrDtTm></FrToDt>'
+                '<Acct><Id><IBAN>%s</IBAN></Id></Acct>%s</Stmt></BkToCstmrStmt></Document>'
+                % (ACME["iban"], "".join(
+                    '<Bal><Tp><CdOrPrtry><Cd>%s</Cd></CdOrPrtry></Tp><Amt>10.00</Amt>'
+                    '<CdtDbtInd>CRDT</CdtDbtInd></Bal>' % code for code in ("OPBD", "CLBD"))))
+        run = Run(datetime.date(2026, 10, 5), "R1", [])
+        runner = PaymentRun(SAP, BANK, ACME, "iso20022")
+        with unittest.mock.patch.object(payment_run_module, "call",
+                                        return_value=(200, camt.encode())), \
+                unittest.mock.patch.object(runner.session, "post_idoc") as posted:
+            runner.reconcile(run)
+        posted.assert_not_called()
+        self.assertEqual(run.statements, [])
+        self.assertEqual(len(run.problems), 1)
+        self.assertIn("does not say what currency", run.problems[0])
+
+
+class ReadingABai2Statement(unittest.TestCase):
+    """What `bai2_statements` takes from a file, with no mock running."""
+
+    def read(self, group_currency, account_currency, *movements):
+        text = "\n".join(
+            ["01,MOCKBANK,ACME,261005,0000,1,80,1,2/",
+             "02,ACME,MOCKBANK,1,261005,0000,%s,2/" % group_currency,
+             "03,0000000001,%s,010,10000,,,015,10000,,/" % account_currency]
+            + ["16,%s,%s,0,%s,MSG-1,text/" % m for m in movements]
+            + ["49,20000,3/", "98,20000,1,5/", "99,20000,1,7/"])
+        return payment_run_module.bai2_statements(text)[0]
+
+    def test_the_currency_is_the_accounts_then_the_groups_then_dollars(self):
+        self.assertEqual(self.read("CAD", "GBP")["currency"], "GBP")
+        self.assertEqual(self.read("CAD", "")["currency"], "CAD")
+        self.assertEqual(self.read("", "")["currency"], "USD")
+
+    def test_only_an_individual_ach_return_item_is_a_payment_coming_back(self):
+        lines = self.read("USD", "USD", ("257", "100", "BACK-1"), ("142", "200", "IN-1"),
+                          ("447", "300", "OUT-1"))["lines"]
+        self.assertEqual([(l["end_to_end_id"], l["side"], l["returned"]) for l in lines],
+                         [("BACK-1", "CRDT", True), ("IN-1", "CRDT", False),
+                          ("OUT-1", "DBIT", False)])
+
+
+class ASecondRunBeforeTheStatement(StatementCase):
+    """#2, the way that is not fixed: this test states what is wrong today.
+
+    Nothing clears an open item until the statement is posted, and SAP has no
+    state between open and cleared that a run could write (mock-sap#90). So a
+    second run started before the statement arrives selects the invoice again,
+    under a new message identification the bank has never seen, and the bank
+    pays it again. When that is fixed this test fails, and is rewritten to say
+    the invoice is paid once.
+    """
+
+    def test_the_invoice_is_paid_twice(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        before = control(BANK, "GET", "/_mock/accounts/ACME")["balance"]
+        first = self.payments.run(self.monday, "R1")
+        second = self.payments.run(self.monday, "R2")
+        self.assertEqual([(r.duplicate, [i.status for i in r.items]) for r in (first, second)],
+                         [(False, ["accepted"]), (False, ["accepted"])])
+        self.advance(self.monday + datetime.timedelta(days=1))
+        self.assertEqual(before - control(BANK, "GET", "/_mock/accounts/ACME")["balance"],
+                         2 * 119000)
+
+
 class WhenSomethingAnswersBadly(MocksCase):
     """mock-bank#73's notes: say what went wrong rather than stop or stay silent."""
 
@@ -539,7 +685,7 @@ class TwoSuppliersWithOneInvoiceNumber(unittest.TestCase):
 
     def post(self, run, applied):
         """One statement posted, with SAP's answer to it supplied."""
-        statement = {"number": "1", "day": "2026-10-05",
+        statement = {"number": "1", "day": "2026-10-05", "currency": "EUR",
                      "opening": Decimal("100.00"), "closing": Decimal("70.00"),
                      "lines": [{"end_to_end_id": "INV-1", "amount": Decimal("10.00"),
                                 "side": "DBIT", "returned_for": ""},

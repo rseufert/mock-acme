@@ -82,5 +82,10 @@ def entries(statement) -> List[Dict[str, str]]:
             # MsgId and EndToEndId, which is how it finds the invoice.
             "returned_for": next((child_text(e, "Rsn", "Cd") for e in entry.iter()
                                   if tag(e) == "RtrInf"), ""),
+            # Whether the entry is a payment coming back at all, which is the
+            # `RtrInf` being there and not what its reason says: a bank may
+            # return a payment and give no code, and money arriving from a
+            # customer has no `RtrInf` whatever it quotes.
+            "returned": any(tag(e) == "RtrInf" for e in entry.iter()),
         })
     return found

@@ -593,6 +593,13 @@ class PaymentRun:
                         "the %s for %s gives no opening and closing ledger balance "
                         "(010 and 015), so it was not posted" % (WHAT[kind], s["day"]))
                     continue
+                if not s["currency"]:
+                    # Not guessed (#2): a statement posted in the wrong currency
+                    # clears a payable in another one, and nothing says so.
+                    run.problems.append(
+                        "the %s for %s does not say what currency the account is "
+                        "in, so it was not posted" % (WHAT[kind], s["day"]))
+                    continue
                 statements.append(s)
         statements.sort(key=lambda s: (s["day"], int(s["number"] or 0)))
         for statement in statements:
@@ -610,7 +617,15 @@ class PaymentRun:
         moved = sum((signed(e["amount"], e["side"]) for e in lines), Decimal("0"))
         record = {"number": number, "date": day,
                   "adds_up": opening + moved == closing,
-                  "finsta": self.finsta(number, day, opening, closing, lines)}
+                  "finsta": self.finsta(number, day, opening, closing, lines,
+                                        statement["currency"])}
+        for line in lines:
+            if received(line) and line["end_to_end_id"]:
+                run.problems.append(
+                    "statement %s for %s has a credit of %s quoting %s that is money "
+                    "arriving, not a payment coming back; it was posted to SAP "
+                    "without that reference, so that SAP does not reopen an invoice "
+                    "it names" % (number, day, line["amount"], line["end_to_end_id"]))
         try:
             applied = self.session.post_idoc(record["finsta"])
         except urllib.error.HTTPError as error:
@@ -694,7 +709,7 @@ class PaymentRun:
                                    c.reference for c in candidates)))
 
     def finsta(self, number: str, day: str, opening: Decimal, closing: Decimal,
-               lines: List[Dict[str, str]]) -> str:
+               lines: List[Dict[str, str]], currency: str) -> str:
         """A camt.053 as a FINSTA01, the way mock-sap reads one.
 
         A line's direction is its amount's sign, written SAP's way with the
@@ -702,6 +717,20 @@ class PaymentRun:
         convention agreed with mock-sap on mock-bank#16. The reference is in
         the structured `E1EDP02`, which is matched exactly, rather than only in
         the note to payee.
+
+        **Money arriving is written without its reference** (#2). SAP reads a
+        credit that quotes a cleared invoice as that payment coming back, and
+        reopens the invoice; the next run then pays it a second time. The
+        FINSTA01 as agreed has no field saying which kind of credit a line is,
+        so the one thing that would mislead SAP is left out, and
+        `post_statement` says so as a problem. The line is still there with its
+        amount, so the statement adds up. This is a stopgap until the two sides
+        agree a way to say it (mock-sap#89), and it is what has to change when
+        SAP clears receivables (mock-sap#65), which need that reference.
+
+        The currency is the statement's own, on every amount and on the
+        account. It was `EUR` whatever the account held, and a dollar statement
+        cleared euro payables with nothing to show for it (#2, mock-sap#88).
         """
         def sap(amount: Decimal) -> str:
             return "%.2f-" % -amount if amount < 0 else "%.2f" % amount
@@ -709,15 +738,18 @@ class PaymentRun:
         def amounts(*pairs) -> str:
             return "".join(
                 "<E1IDPU5 SEGMENT=\"1\"><MOAQUAL>%s</MOAQUAL><MOABETR>%s</MOABETR>"
-                "<CUXWAERZ>EUR</CUXWAERZ></E1IDPU5>" % (q, sap(a)) for q, a in pairs)
+                "<CUXWAERZ>%s</CUXWAERZ></E1IDPU5>" % (q, sap(a), escape(currency))
+                for q, a in pairs)
 
         body = []
         for position, line in enumerate(lines, 1):
-            body.append(
-                "<E1IDPF1 SEGMENT=\"1\"><LINLINEIT>%06d</LINLINEIT>"
+            reference = "" if received(line) else (
                 "<E1EDP02 SEGMENT=\"1\"><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDP02>"
-                "%s</E1IDPF1>" % (position, escape(line["end_to_end_id"]),
-                                  amounts(("001", signed(line["amount"], line["side"])))))
+                % escape(line["end_to_end_id"]))
+            body.append(
+                "<E1IDPF1 SEGMENT=\"1\"><LINLINEIT>%06d</LINLINEIT>%s%s</E1IDPF1>"
+                % (position, reference,
+                   amounts(("001", signed(line["amount"], line["side"])))))
         debits = sum((Decimal(e["amount"]) for e in lines if e["side"] == "DBIT"), Decimal(0))
         credits = sum((Decimal(e["amount"]) for e in lines if e["side"] == "CRDT"), Decimal(0))
         body.append("<E1IDPF1 SEGMENT=\"1\"><LINLINEIT>%06d</LINLINEIT>%s</E1IDPF1>" % (
@@ -729,15 +761,16 @@ class PaymentRun:
                 "</EDI_DC40><E1IDKU1 SEGMENT=\"1\"><BGMREF>%s</BGMREF>"
                 "<E1EDK03 SEGMENT=\"1\"><IDDAT>026</IDDAT><DATUM>%s</DATUM></E1EDK03>"
                 "<E1IDB02 SEGMENT=\"1\"><FIIBKENN>%s</FIIBKENN><FIIKONTO>%s</FIIKONTO>"
-                "<FIIBLAND>%s</FIIBLAND><FIIKWAER>EUR</FIIKWAER></E1IDB02>%s"
+                "<FIIBLAND>%s</FIIBLAND><FIIKWAER>%s</FIIKWAER></E1IDB02>%s"
                 "</E1IDKU1></IDOC></FINSTA01>"
                 % (escape(number), day.replace("-", ""), escape(self.company["bic"]),
-                   escape(iban), iban[:2], "".join(body)))
+                   escape(iban), iban[:2], escape(currency), "".join(body)))
 
 
 def camt_statements(text: str) -> List[Dict]:
     """Every `Stmt` in a run of `camt.053` documents, as a plain statement."""
     return [{"account": child_text(s, "Acct", "Id", "IBAN"),
+             "currency": child_text(s, "Acct", "Ccy"),
              "number": child_text(s, "ElctrncSeqNb"),
              "day": child_text(s, "FrToDt", "FrDtTm")[:10],
              "opening": balance(s, "OPBD"), "closing": balance(s, "CLBD"),
@@ -841,6 +874,14 @@ def funds_width(fields: List[str]) -> int:
     raise ValueError("funds type %r is not one BAI2 defines" % kind)
 
 
+# Individual ACH Return Item, on the credit side: a payment this account sent,
+# coming back. It is the code mock-bank writes for one, and by its account of
+# the specification's table the only individual-item return code among the
+# credits (`168` is a settlement total). A bank that reports returns under
+# another code would have them read as money arriving, and left alone.
+BAI2_RETURNED = "257"
+
+
 def bai2_statements(text: str) -> List[Dict]:
     """Every account in a run of BAI2 files, as the same plain statement.
 
@@ -849,7 +890,13 @@ def bai2_statements(text: str) -> List[Dict]:
     account and its `010` opening and `015` closing ledger balances, and each
     `16` a movement: amounts are in cents, and the direction is the type code's
     range, 100 to 399 a credit and 400 to 699 a debit, so no particular code
-    need be known. The `EndToEndId` is the bank reference number and the file's
+    need be known for that. One code is known, because nothing else on a BAI2
+    line says it: `257`, Individual ACH Return Item, is a payment coming back,
+    and any other credit is money arriving. The account's currency is the
+    `03`'s, or the group's from the `02` when the `03` leaves it out, or `USD`
+    when both do, which is the default the BAI2 specification gives; that last
+    step is from memory of the specification, not from a copy of it.
+    The `EndToEndId` is the bank reference number and the file's
     `MsgId` the customer reference, found after however many fields the funds
     type takes; the text after them runs to the end of the record, commas and
     all, and is not needed here. An account the bank reports
@@ -858,7 +905,7 @@ def bai2_statements(text: str) -> List[Dict]:
     statement, but the accounts beside it may be.
     """
     out: List[Dict] = []
-    number = day = ""
+    number = day = group_currency = ""
     current: Optional[Dict] = None
     for fields in bai2_records(text):
         code = fields[0]
@@ -866,6 +913,7 @@ def bai2_statements(text: str) -> List[Dict]:
             number = fields[5]
         elif code == "02":
             day = "20%s-%s-%s" % (fields[4][:2], fields[4][2:4], fields[4][4:6])
+            group_currency = fields[6] if len(fields) > 6 else ""
         elif code == "03":
             balances, at = {}, 3
             while at + 2 < len(fields):
@@ -873,6 +921,7 @@ def bai2_statements(text: str) -> List[Dict]:
                     balances[fields[at]] = cents(fields[at + 1])
                 at += 3 + funds_width(fields[at + 3:])
             current = {"account": fields[1], "number": number, "day": day,
+                       "currency": fields[2] or group_currency or "USD",
                        "opening": balances.get("010"), "closing": balances.get("015"),
                        "lines": []}
         elif code == "16" and current is not None:
@@ -885,7 +934,7 @@ def bai2_statements(text: str) -> List[Dict]:
                 "amount": str(cents(fields[2])),
                 "side": "CRDT" if kind < 400 else "DBIT",
                 "booked_on": day, "end_to_end_id": refs[0], "msg_id": refs[1],
-                "returned_for": ""})
+                "returned_for": "", "returned": fields[1] == BAI2_RETURNED})
         elif code == "49" and current is not None:
             out.append(current)
             current = None
@@ -944,6 +993,11 @@ def unanswered(side: str, consequence: str, error) -> str:
     """A host that did not answer at all, named, and what that left undone."""
     return "%s did not answer, so %s: %s" % (side, consequence,
                                               getattr(error, "reason", error))
+
+
+def received(line: Dict) -> bool:
+    """A credit that is money arriving rather than a payment coming back."""
+    return line["side"] == "CRDT" and not line["returned"]
 
 
 def signed(amount: str, side: str) -> Decimal:

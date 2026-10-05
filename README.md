@@ -46,10 +46,18 @@ PAYMENT_RUN_FORMAT=nacha python3 -m unittest -v tests.test_payment_run
 
 ## Known to be wrong
 
-`payment_run` can pay an invoice twice. The ways are listed in
-[mock-bank#164](https://github.com/rseufert/mock-bank/issues/164) and, for the
-half that is SAP's, [mock-sap#86 to #90](https://github.com/rseufert/mock-sap/issues).
-They moved here with the code and are not fixed by the move.
+`payment_run` can pay an invoice twice: a second run started before the bank's
+statement has been posted selects the same invoice again, and the bank pays it
+again. SAP offers no state between open and cleared for a run to write
+([mock-sap#90](https://github.com/rseufert/mock-sap/issues/90)), so this is not
+fixed, and `tests/test_payment_run.py` has a test that says so. It is tracked
+in [#2](https://github.com/rseufert/mock-acme/issues/2).
+
+Money arriving is posted to SAP without the reference it quotes, so that SAP
+does not take it for a returned payment and reopen an invoice. That is a
+stopgap, said as a problem on the run each time it happens, until the FINSTA01
+has a way to tell the two apart
+([mock-sap#89](https://github.com/rseufert/mock-sap/issues/89)).
 
 ## Where the code came from
 
