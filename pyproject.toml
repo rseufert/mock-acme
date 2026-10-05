@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mock-acme"
+version = "0.1.0.dev0"
+description = "The integration between the mocks: the middleware that mock-sap, mock-edi and mock-bank exist to test. Zero dependencies."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["sap", "edi", "x12", "iso20022", "procure-to-pay", "reconciliation",
+            "integration", "middleware", "mock", "testing"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Office/Business :: Financial",
+  "Topic :: Software Development :: Testing",
+]
+# The package talks to the mocks over HTTP and imports none of them, so it
+# needs nothing. The tests need all three running: see `test` below.
+dependencies = []
+
+[project.optional-dependencies]
+# mock-sap 0.13.2 is a real floor: before it the INVOIC procure_to_pay sends
+# created no payable. The other two carry no floor anyone has found.
+test = ["mock-sap>=0.13.2", "mock-edi", "mock-bank"]
+
+[project.urls]
+Repository = "https://github.com/rseufert/mock-acme"
+Issues = "https://github.com/rseufert/mock-acme/issues"
+
+[tool.setuptools]
+packages = ["mockacme"]

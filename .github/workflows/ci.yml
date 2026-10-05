@@ -15,19 +15,63 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # There is no package yet. This job is the place the test matrix goes when
-  # there is one; until then it checks that whatever Python is here compiles.
-  compile:
-    name: byte-compile
+  test:
+    name: tests (py${{ matrix.python }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 3.8 is not in the tool cache on ubuntu-latest any more
+          - {os: ubuntu-22.04, python: "3.8"}
+          - {os: ubuntu-latest, python: "3.9"}
+          - {os: ubuntu-latest, python: "3.10"}
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.12"}
+          - {os: ubuntu-latest, python: "3.13"}
+          - {os: ubuntu-latest, python: "3.14"}
+          - {os: macos-latest, python: "3.12"}
+          - {os: windows-latest, python: "3.12"}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Byte-compile every module
+        run: python -m compileall -q mockacme tests
+      # The released mocks, from PyPI: what a reader who follows the README
+      # gets. `tests/__init__.py` starts them.
+      - name: Install the three mocks
+        run: python -m pip install -e ".[test]"
+      - name: Say which mocks these are
+        run: python -m pip list
+      - name: Run the tests against the released mocks
+        run: python -X faulthandler -m unittest discover -s tests -t . -v
+      - name: Run the payment run again, paying by ACH
+        env:
+          PAYMENT_RUN_FORMAT: nacha
+        run: python -X faulthandler -m unittest -v tests.test_payment_run
+
+  package:
+    name: package builds and installs
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - name: Byte-compile every module
-        run: python -m compileall -q .
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build
+      - name: The wheel installs with nothing else and imports
+        run: |
+          set -eu
+          python -m venv /tmp/wheel
+          /tmp/wheel/bin/pip install dist/*.whl
+          cd /tmp
+          /tmp/wheel/bin/python -c "import mockacme.procure_to_pay, mockacme.po_bridge, mockacme.pay_invoices; print(mockacme.__version__)"
+          test "$(/tmp/wheel/bin/pip list --format=freeze | grep -vicE '^(pip|setuptools|wheel|mock-acme)==')" = "0"
 
   # The one check `main` requires (docs/GITHUB.md). Its name is load-bearing:
   # the branch ruleset asks for "CI passed" by name, so add jobs to `needs`
@@ -38,7 +82,7 @@ jobs:
   all:
     name: CI passed
     if: always()
-    needs: [compile]
+    needs: [test, package]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
