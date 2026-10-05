@@ -40,6 +40,7 @@ test = ["mock-sap>=0.17.0", "mock-edi", "mock-bank"]
 [project.urls]
 Repository = "https://github.com/rseufert/mock-acme"
 Issues = "https://github.com/rseufert/mock-acme/issues"
+Changelog = "https://github.com/rseufert/mock-acme/blob/main/CHANGELOG.md"
 
 [tool.setuptools]
 packages = ["mockacme"]
