@@ -457,9 +457,56 @@ class MoneyArriving(StatementCase):
         items = self.by_reference(run)
         self.assertEqual((items["GLX-4711"].status, items["UMB-0815"].status),
                          ("cleared", "returned"))
+        # And each said which it was, on the statement SAP was given.
+        written = "".join(statement["finsta"] for statement in run.statements)
+        self.assertEqual(sorted(re.findall(r"<LINACTION>(\w+)</LINACTION>", written)),
+                         ["RCV", "RET"])
         self.assertTrue(items["UMB-0815"].reason.startswith(CLOSED), items["UMB-0815"].reason)
         self.assertEqual([i.reference for i in self.payments.select(self.bank_today())],
                          ["UMB-0815"])
+
+
+class WhatACreditSaysItIs(unittest.TestCase):
+    """#18: each credit on the FINSTA01 declares itself a return or a receipt.
+
+    The sign says money came in and nothing more. mock-sap reads the
+    declaration from the release after 0.18.0, and there a credit that makes
+    none reverses nothing - so a return that did not say so would stop
+    reopening its invoice. With no mock running: this is what is written.
+    """
+
+    def lines(self):
+        finsta = PaymentRun(SAP, BANK, ACME, MODE).finsta(
+            "7", "2026-10-08", Decimal("100.00"), Decimal("110.00"), [
+                {"end_to_end_id": "OUT-1", "amount": "10.00", "side": "DBIT",
+                 "returned": False},
+                {"end_to_end_id": "BACK-1", "amount": "15.00", "side": "CRDT",
+                 "returned": True},
+                {"end_to_end_id": "IN-1", "amount": "5.00", "side": "CRDT",
+                 "returned": False}], CURRENCY)
+        return re.findall(r"<E1IDPF1 SEGMENT=\"1\">(.*?)</E1IDPF1>", finsta)[:3]
+
+    def test_a_return_says_ret_and_keeps_the_reference_sap_reopens_by(self):
+        _, back, _ = self.lines()
+        self.assertIn("<LINACTION>RET</LINACTION>", back)
+        self.assertIn("<BELNR>BACK-1</BELNR>", back)
+
+    def test_money_arriving_says_rcv(self):
+        _, _, arrived = self.lines()
+        self.assertIn("<LINACTION>RCV</LINACTION>", arrived)
+        # Still without its reference, for a mock-sap that does not read the
+        # declaration and would reopen an invoice on the reference alone.
+        self.assertNotIn("IN-1", arrived)
+
+    def test_a_debit_says_nothing_because_it_has_one_reading(self):
+        out, _, _ = self.lines()
+        self.assertNotIn("LINACTION", out)
+        self.assertIn("<BELNR>OUT-1</BELNR>", out)
+
+    def test_the_declaration_comes_before_the_segments_inside_the_line(self):
+        """A field of the segment, so it is written with the segment's fields."""
+        for line in self.lines()[1:]:
+            self.assertTrue(re.match(r"<LINLINEIT>\d{6}</LINLINEIT><LINACTION>", line), line)
 
 
 class TheStatementsCurrency(StatementCase):
