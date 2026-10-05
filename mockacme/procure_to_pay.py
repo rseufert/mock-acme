@@ -140,15 +140,22 @@ class ProcureToPay:
     `durable` chooses which duplicate check the middleware has, because the
     difference between them is a scenario rather than a setting somebody should
     pick by taste. `False` is `invoice_check` as it ships.
+
+    `register` is the payment run's record of what it has sent to the bank and
+    not yet seen settled (`payment_run.Register`). Left out, it is kept in
+    memory, which is right for one process that pays and reconciles and exits.
+    Middleware that is started again each day passes `Register(path)`, or the
+    run after a restart pays what the run before it already sent.
     """
 
     def __init__(self, sap: str, edi: str, bank: str, our_id: str,
-                 company: Dict[str, str], durable: bool = True):
+                 company: Dict[str, str], durable: bool = True,
+                 register: Optional[payment_run.Register] = None):
         self.sap_url, self.edi, self.bank = sap, edi, bank
         self.sap = invoice_check.Sap(sap)
         check = DurableInvoiceCheck if durable else invoice_check.InvoiceCheck
         self.check = check(self.sap, edi, our_id)
-        self.payments = payment_run.PaymentRun(sap, bank, company)
+        self.payments = payment_run.PaymentRun(sap, bank, company, register=register)
 
     # -- 1. order --------------------------------------------------------------
 

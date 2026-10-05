@@ -44,13 +44,14 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import tempfile
 import unittest
 import urllib.parse
 import urllib.request
 from decimal import Decimal
 
 from mockacme.invoice_check import PO_SERVICE, Sap
-from mockacme.payment_run import ITEMS, OPEN_SUPPLIER_ITEMS, odata
+from mockacme.payment_run import ITEMS, OPEN_SUPPLIER_ITEMS, Register, odata
 from mockacme.procure_to_pay import DurableInvoiceCheck, ProcureToPay, odata_string
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
@@ -84,9 +85,9 @@ class PurchaseCase(unittest.TestCase):
         self.control_number = 0
         self.p2p = self.middleware()
 
-    def middleware(self, durable=True):
+    def middleware(self, durable=True, register=None):
         return ProcureToPay(SAP, EDI, BANK, our_id="ACME", company=ACME,
-                            durable=durable)
+                            durable=durable, register=register)
 
     # -- arranging -------------------------------------------------------------
 
@@ -252,6 +253,66 @@ class TestOnePurchase(PurchaseCase):
         self.assertEqual(item.reference, approved["invoice"])
         paid = control(BANK, "GET", "/_mock/payments/%s" % item.reference)
         self.assertEqual(paid["end_to_end_id"], approved["invoice"])
+
+
+class TestTheMiddlewareRestartedBeforeTheStatement(PurchaseCase):
+    """The payment run's register, reached through `ProcureToPay` (#2).
+
+    The run records what it has sent to the bank, so that a second run before
+    the statement does not pay it again. That only helps a restarted middleware
+    if the record is somewhere a restart does not lose, and `ProcureToPay`
+    builds its own `PaymentRun`: without a way to hand it a register, the
+    durable one could not be had from here at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = os.path.join(directory.name, "in-payment.json")
+
+    def approved_and_due(self, p2p):
+        self.purchase(p2p=p2p)
+        self.assertEqual([r["status"] for r in p2p.approve()], ["posted"])
+        due = p2p.last_due_date()
+        self.advance_bank_to(due)
+        return max(due, self.bank_today())
+
+    def test_the_register_given_is_the_one_the_payment_run_keeps(self):
+        register = Register(self.path)
+        self.assertIs(self.middleware(register=register).payments.register, register)
+
+    def test_with_a_register_on_disk_the_restart_does_not_pay_again(self):
+        first = self.middleware(register=Register(self.path))
+        run_on = self.approved_and_due(first)
+        self.assertEqual([i.status for i in first.pay(run_on, "RUN1").items], ["accepted"])
+
+        restarted = self.middleware(register=Register(self.path))
+        [held] = restarted.pay(run_on, "RUN2").items
+        self.assertEqual(held.status, "skipped")
+        self.assertIn("in payment", held.reason)
+
+    def test_without_one_the_restart_pays_again(self):
+        """What leaving `register` out means, stated: memory does not restart."""
+        first = self.middleware()
+        run_on = self.approved_and_due(first)
+        self.assertEqual([i.status for i in first.pay(run_on, "RUN1").items], ["accepted"])
+
+        restarted = self.middleware()
+        self.assertEqual([i.status for i in restarted.pay(run_on, "RUN2").items],
+                         ["accepted"])
+
+    def test_the_statement_lets_go_of_it_whichever_middleware_posts_it(self):
+        first = self.middleware(register=Register(self.path))
+        run_on = self.approved_and_due(first)
+        run = first.pay(run_on, "RUN1")
+        self.assertEqual(len(Register(self.path).entries), 1, "held, and on disk")
+        self.advance_bank_to(self.day_after_settlement(run))
+
+        restarted = self.middleware(register=Register(self.path))
+        restarted.reconcile(run)
+        self.assertEqual(run.items[0].status, "cleared")
+        self.assertEqual(Register(self.path).entries, {})
 
 
 class TestTheSameInvoiceTwice(PurchaseCase):

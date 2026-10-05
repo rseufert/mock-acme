@@ -8,6 +8,14 @@ says so where it does.
 
 ## [Unreleased]
 
+### Added
+
+- **`ProcureToPay` takes the payment run's register** ([#2]).
+  `ProcureToPay(..., register=Register(path))` hands it to the `PaymentRun` it
+  builds. Without this the register kept in a file, which is the one a
+  restarted middleware needs, could not be had through `ProcureToPay` at all.
+  Left out, it is in memory as before.
+
 ### Fixed
 
 - **A second payment run before the statement no longer pays the same invoice
