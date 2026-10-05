@@ -20,6 +20,7 @@ import json
 import os
 import re
 import socket
+import tempfile
 import unittest
 import unittest.mock
 import urllib.parse
@@ -28,8 +29,9 @@ from decimal import Decimal
 
 from mockacme import payment_run as payment_run_module
 from mockacme.bank_messages import call
-from mockacme.payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun, Run,
-                         SapSession, nacha_time_and_modifier, odata)
+from mockacme.payment_run import (ITEMS, ODATA, OPEN_SUPPLIER_ITEMS, Item, PaymentRun,
+                                  Register, Run, SapSession, nacha_time_and_modifier,
+                                  odata)
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 BANK = os.environ.get("BANK_URL", "http://127.0.0.1:8090")
@@ -520,27 +522,232 @@ class ReadingABai2Statement(unittest.TestCase):
 
 
 class ASecondRunBeforeTheStatement(StatementCase):
-    """#2, the way that is not fixed: this test states what is wrong today.
+    """#2: an item one run has sent to the bank is not paid again by the next.
 
     Nothing clears an open item until the statement is posted, and SAP has no
-    state between open and cleared that a run could write (mock-sap#90). So a
-    second run started before the statement arrives selects the invoice again,
-    under a new message identification the bank has never seen, and the bank
-    pays it again. When that is fixed this test fails, and is rewritten to say
-    the invoice is paid once.
+    state between open and cleared that a run could write (mock-sap#90). So the
+    run keeps its own `Register`, and these hold it to what that promises: one
+    payment, and the item free again exactly when the bank refuses it or SAP
+    clears it.
     """
 
-    def test_the_invoice_is_paid_twice(self):
+    def spent(self, before):
+        return before - control(BANK, "GET", "/_mock/accounts/ACME")["balance"]
+
+    def test_the_invoice_is_paid_once(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         self.advance(self.monday)
         before = control(BANK, "GET", "/_mock/accounts/ACME")["balance"]
         first = self.payments.run(self.monday, "R1")
         second = self.payments.run(self.monday, "R2")
-        self.assertEqual([(r.duplicate, [i.status for i in r.items]) for r in (first, second)],
-                         [(False, ["accepted"]), (False, ["accepted"])])
+        self.assertEqual([i.status for i in first.items], ["accepted"])
+        [held] = second.items
+        self.assertEqual(held.status, "skipped")
+        # It says which run has it, so that somebody reading the second run's
+        # result is not left wondering why a due invoice was not paid.
+        self.assertIn(first.msg_id, held.reason)
+        self.assertIn(self.monday.isoformat(), held.reason)
+        self.assertIsNone(second.http_status, "nothing to pay is no file sent")
+        self.advance(self.monday + datetime.timedelta(days=1))
+        self.assertEqual(self.spent(before), 119000)
+
+    def test_an_item_nobody_has_sent_is_still_paid_by_the_second_run(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        self.payments.run(self.monday, "R1")
+        self.sap.invoice(UMBRELLA, "UMB-0815", "238.00", dated=self.today)
+        second = self.payments.run(self.monday, "R2")
+        self.assertEqual({r: i.status for r, i in self.by_reference(second).items()},
+                         {"GLX-4711": "skipped", "UMB-0815": "accepted"})
+
+    def test_the_same_run_again_is_not_held_back_from_its_own_items(self):
+        """It is sent, and the bank refuses the copy: what the run promised before."""
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        before = control(BANK, "GET", "/_mock/accounts/ACME")["balance"]
+        self.payments.run(self.monday, "R1")
+        again = self.payments.run(self.monday, "R1")
+        self.assertTrue(again.duplicate)
+        self.assertEqual([i.status for i in again.items], ["sent"])
+        self.advance(self.monday + datetime.timedelta(days=1))
+        self.assertEqual(self.spent(before), 119000)
+
+    def test_once_sap_has_cleared_it_the_register_lets_go(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        run = self.pay_on_monday()
+        [item] = run.items
+        self.assertIsNotNone(self.payments.register.holder(item.document),
+                             "accepted is not paid: still held until the statement")
+        self.payments.reconcile(run)
+        self.assertEqual(item.status, "cleared")
+        self.assertIsNone(self.payments.register.holder(item.document))
+
+    def test_a_statement_posted_by_another_run_lets_go_of_it_too(self):
+        """Released by SAP's document number, not by whose items a run holds."""
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        run = self.pay_on_monday()
+        [item] = run.items
+        somebody_else = Run(self.monday + datetime.timedelta(days=1), "R9")
+        self.payments.reconcile(somebody_else)
+        self.assertNotEqual(self.clearing("GLX-4711"), "")
+        self.assertIsNone(self.payments.register.holder(item.document))
+
+    def test_a_payment_the_bank_refused_is_free_for_the_next_run(self):
+        self.sap.invoice(INITECH, "INI-2026-17", "595.00")
+        self.advance(self.monday)
+        first = self.payments.run(self.monday, "R1")
+        [refused] = first.items
+        self.assertEqual((refused.status, refused.reason), ("rejected", CLOSED))
+        self.assertIsNone(self.payments.register.holder(refused.document))
+        second = self.payments.run(self.monday, "R2")
+        # Sent again and refused again, which is right: the item is owed, and
+        # it is the vendor master that is wrong, not the run.
+        self.assertEqual([(i.status, i.reason) for i in second.items],
+                         [("rejected", CLOSED)])
+
+    def test_a_payment_that_came_back_is_paid_again_by_the_next_run(self):
+        control(BANK, "PATCH", "/_mock/accounts/ACME", {
+            "behaviour": "return-later",
+            "parameters": {"end_to_end_id": "GLX-4711", "days": 3, "reason": CLOSED}})
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        run = self.pay_on_monday()
+        self.payments.reconcile(run)
+        friday = self.monday + datetime.timedelta(days=4)
+        self.advance(friday)
+        self.payments.reconcile(run)
+        self.assertEqual(run.items[0].status, "returned")
+        again = self.payments.run(friday, "R2")
+        self.assertEqual([i.status for i in again.items], ["accepted"])
+
+    def test_a_bank_that_did_not_answer_leaves_the_item_with_the_run_that_tried(self):
+        """A request that timed out may have arrived. Another run does not get to
+        find out by paying; the run that tried sends its own file again."""
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        register = self.payments.register
+        unheard = PaymentRun(SAP, closed_port(), ACME, MODE, register=register)
+        first = unheard.run(self.monday, "R1")
+        self.assertEqual([i.status for i in first.items], ["selected"])
+        self.assertIn("did not answer", first.problems[0])
+        other = self.payments.run(self.monday, "R2")
+        self.assertEqual([i.status for i in other.items], ["skipped"])
+        same = self.payments.run(self.monday, "R1")
+        self.assertEqual([i.status for i in same.items], ["accepted"])
+
+
+class TheRegisterOnDisk(StatementCase):
+    """A payment program is started again each day; what it sent has to be there."""
+
+    def setUp(self):
+        super().setUp()
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = os.path.join(self.directory.name, "in-payment.json")
+
+    def test_a_new_process_with_the_same_file_does_not_pay_again(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        before = control(BANK, "GET", "/_mock/accounts/ACME")["balance"]
+        first = PaymentRun(SAP, BANK, ACME, MODE, register=Register(self.path))
+        self.assertEqual([i.status for i in first.run(self.monday, "R1").items], ["accepted"])
+        # Nothing shared with the first but the file.
+        second = PaymentRun(SAP, BANK, ACME, MODE, register=Register(self.path))
+        self.assertEqual([i.status for i in second.run(self.monday, "R2").items], ["skipped"])
         self.advance(self.monday + datetime.timedelta(days=1))
         self.assertEqual(before - control(BANK, "GET", "/_mock/accounts/ACME")["balance"],
-                         2 * 119000)
+                         119000)
+
+    def test_without_a_file_a_new_process_knows_nothing_and_pays_again(self):
+        """The limit of the default, stated: in memory protects one object."""
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        PaymentRun(SAP, BANK, ACME, MODE).run(self.monday, "R1")
+        forgetful = PaymentRun(SAP, BANK, ACME, MODE).run(self.monday, "R2")
+        self.assertEqual([i.status for i in forgetful.items], ["accepted"])
+
+    def test_the_entry_is_on_disk_before_the_file_reaches_the_bank(self):
+        """Write-ahead: a crash after sending must not find the register empty."""
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        runner = PaymentRun(SAP, BANK, ACME, MODE, register=Register(self.path))
+        seen = []
+
+        def sending(base, method, path, body=None, content_type=""):
+            if path == "/payments":
+                seen.append(dict(Register(self.path).entries))
+            return call(base, method, path, body, content_type)
+
+        with unittest.mock.patch.object(payment_run_module, "call", sending):
+            run = runner.run(self.monday, "R1")
+        [item] = run.items
+        self.assertEqual(seen, [{item.document: {
+            "msg_id": run.msg_id, "run_on": self.monday.isoformat(),
+            "reference": "GLX-4711", "amount": "1190.00", "currency": CURRENCY}}])
+
+    def test_cleared_and_refused_are_gone_from_the_file_as_well(self):
+        self.post_three()
+        runner = PaymentRun(SAP, BANK, ACME, MODE, register=Register(self.path))
+        self.advance(self.monday)
+        run = runner.run(self.monday, "R1")
+        held = {e["reference"] for e in Register(self.path).entries.values()}
+        self.assertEqual(held, {"GLX-4711", "UMB-0815"}, "INITECH's was refused")
+        self.advance(self.monday + datetime.timedelta(days=1))
+        runner.reconcile(run)
+        self.assertEqual(Register(self.path).entries, {})
+
+
+class TheRegisterItself(unittest.TestCase):
+    """What `Register` does with a file, with no mock running."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = os.path.join(self.directory.name, "in-payment.json")
+        self.run_ = Run(datetime.date(2026, 10, 5), "R1")
+        self.item = Item(document="1010/2026/1900000001", supplier="1000013",
+                         reference="INV-1", amount="10.00")
+
+    def test_a_file_that_is_not_there_yet_is_an_empty_register(self):
+        self.assertEqual(Register(self.path).entries, {})
+        self.assertFalse(os.path.exists(self.path), "reading writes nothing")
+
+    def test_it_lets_go_by_the_full_key_or_by_saps_document_number(self):
+        for key in ("1010/2026/1900000001", "1900000001"):
+            with self.subTest(key=key):
+                register = Register(self.path)
+                register.hold([self.item], self.run_)
+                self.assertTrue(register.release(key))
+                self.assertEqual(Register(self.path).entries, {})
+
+    def test_a_number_that_only_ends_the_same_is_not_that_document(self):
+        register = Register(self.path)
+        register.hold([self.item], self.run_)
+        self.assertFalse(register.release("900000001"))
+        self.assertFalse(register.release("1010/2026/190000000"))
+        self.assertIsNotNone(register.holder(self.item.document))
+
+    def test_no_half_written_file_is_left_beside_it(self):
+        Register(self.path).hold([self.item], self.run_)
+        self.assertEqual(os.listdir(self.directory.name), ["in-payment.json"])
+
+    def test_a_write_that_dies_half_way_leaves_the_register_that_was_there(self):
+        register = Register(self.path)
+        register.hold([self.item], self.run_)
+        other = Item(document="1010/2026/1900000002", supplier="1000016",
+                     reference="INV-2", amount="20.00")
+        with unittest.mock.patch.object(payment_run_module.os, "fsync",
+                                        side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                register.hold([other], self.run_)
+        # The file is still the one from before, whole and readable.
+        self.assertEqual(list(Register(self.path).entries), [self.item.document])
+
+    def test_a_file_from_some_other_version_is_refused_not_guessed_at(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            json.dump({"version": 2, "in_payment": {}}, handle)
+        with self.assertRaises(ValueError) as refused:
+            Register(self.path)
+        self.assertIn("version is 2", str(refused.exception))
 
 
 class WhenSomethingAnswersBadly(MocksCase):
