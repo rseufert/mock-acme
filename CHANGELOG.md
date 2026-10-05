@@ -14,8 +14,9 @@ Nothing yet.
 
 A second payment run before the statement no longer pays an invoice again,
 `invoice_check` is corrected in five places, and `procure_to_pay` ends with the
-supplier told what was paid. **Two behaviours change for a caller**, under
-Changed: read them before upgrading from 0.1.0.
+supplier told what was paid. The statement posted to SAP also says what the
+next mock-sap release will need it to. **Two behaviours change for a caller**,
+under Changed: read them before upgrading from 0.1.0.
 
 ### Added
 
