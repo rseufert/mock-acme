@@ -22,6 +22,20 @@ says so where it does.
   `PaymentRun` object and no other process. It is the caller's own record, not
   SAP's: rseufert/mock-sap#90 is still the fix for two installations, or two
   processes at once.
+- **A fractional quantity is ordered as it stands** ([#8]). `po_bridge` and
+  `invoice_check.send_order` wrote a purchase order's quantity into the 850 with
+  `%d`, so an order for 2.5 was sent as an order for 2. The supplier confirmed,
+  shipped and billed 2, and the three-way match found nothing wrong.
+- **An invoice that carries sales tax is no longer blocked for it** ([#8]).
+  `invoice_check` reads the `TXI` segments, adds the tax in before comparing
+  the total, and tells SAP the net, the tax and the gross apart. Against
+  mock-edi started with `--tax-rate`, every correct invoice used to be blocked
+  as not adding up. The rate itself is not checked, and charges and allowances
+  (`SAC`) are still not read.
+- **`po_bridge` and `invoice_check` no longer take each other's documents out
+  of the supplier's mailbox** ([#8]). Each collected the whole mailbox and kept
+  what it read, so whichever ran first dropped the other's: no confirmation
+  reached SAP, or no invoice did. Each now asks only for the kinds it reads.
 
 ### Changed
 
@@ -78,3 +92,4 @@ These differ from the last copies the mocks carried.
 [#3]: https://github.com/rseufert/mock-acme/pull/3
 [#4]: https://github.com/rseufert/mock-acme/pull/4
 [#6]: https://github.com/rseufert/mock-acme/pull/6
+[#8]: https://github.com/rseufert/mock-acme/issues/8

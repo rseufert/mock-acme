@@ -14,7 +14,10 @@ import urllib.parse
 import urllib.request
 from decimal import Decimal
 
-from mockacme.invoice_check import PO_SERVICE, InvoiceCheck, Sap, send_order
+import tests
+from mockacme import po_bridge
+from mockacme.invoice_check import (PO_SERVICE, InvoiceCheck, Sap, invoic_idoc, read_810,
+                                    send_order)
 
 SAP = os.environ.get("SAP_URL", "http://127.0.0.1:8000")
 EDI = os.environ.get("EDI_URL", "http://127.0.0.1:8080")
@@ -290,6 +293,203 @@ class SupplierInvoices(unittest.TestCase):
         self.assertEqual(second["status"], "blocked")
         self.assertIn("already been posted", second["problems"][0])
         self.assertEqual(len(self.invoice_idocs()), 1)
+
+
+def one_line_order(sap, quantity, price="12.50"):
+    """A PO in SAP for one line of widgets. Returns its number."""
+    return sap.request("POST", PO_SERVICE + "/A_PurchaseOrder", {
+        "PurchaseOrderType": "NB", "CompanyCode": "1710",
+        "PurchasingOrganization": "1710", "PurchasingGroup": "001",
+        "Supplier": "1000012", "DocumentCurrency": "USD",
+        "to_PurchaseOrderItem": [
+            {"Material": "TG11", "OrderQuantity": quantity, "NetPriceAmount": price,
+             "PurchaseOrderQuantityUnit": "PC", "Plant": "1010"}]})["d"]["PurchaseOrder"]
+
+
+def lines_of(document, *tags):
+    """The segments of an X12 payload that start with one of `tags`."""
+    return [segment for segment in document["payload"].replace("\n", "").split("~")
+            if segment.split("*")[0] in tags]
+
+
+class AFractionalQuantity(unittest.TestCase):
+    """#8: an order for 2.5 goes onto the wire as 2.5.
+
+    It went as 2. The supplier confirmed 2, shipped 2 and billed 2, every
+    document agreed with every other, and the invoice was posted with no
+    problem found - for less than was ordered.
+    """
+
+    def setUp(self):
+        control(SAP, "POST", "/_mock/reset")
+        control(EDI, "POST", "/_mock/reset")
+        self.sap = Sap(SAP)
+
+    def what_the_supplier_made_of_it(self):
+        """The supplier's own documents, looked at without collecting them."""
+        return {d["code"]: d for d in control(EDI, "GET", "/_mock/mailbox?partner=ACME&leave")}
+
+    def test_sap_holds_the_fraction_this_starts_from(self):
+        po = one_line_order(self.sap, "2.5")
+        [item] = self.sap.purchase_order(po)["to_PurchaseOrderItem"]["results"]
+        self.assertEqual(Decimal(item["OrderQuantity"]), Decimal("2.5"))
+
+    def test_the_supplier_is_asked_for_and_bills_what_was_ordered(self):
+        po = one_line_order(self.sap, "2.5")
+        self.assertTrue(send_order(self.sap, EDI, po, sender="ACME")["accepted"])
+        documents = self.what_the_supplier_made_of_it()
+        # The 855 echoes the PO1 it read: what arrived, in the supplier's words.
+        self.assertEqual([l.split("*")[2] for l in lines_of(documents["855"], "PO1")], ["2.5"])
+        self.assertEqual([l.split("*")[2] for l in lines_of(documents["810"], "IT1")], ["2.5"])
+        self.assertEqual(lines_of(documents["810"], "TDS"), ["TDS*3125"])
+
+        [result] = InvoiceCheck(self.sap, EDI, our_id="ACME").run()
+        self.assertEqual((result["status"], result["problems"]), ("posted", []))
+
+    def test_the_bridge_sends_the_fraction_as_well(self):
+        po = one_line_order(self.sap, "0.125")
+        bridge = po_bridge.Bridge(po_bridge.Sap(SAP), EDI, our_id="ACME",
+                                  supplier_id="MOCKEDI")
+        self.assertTrue(bridge.send(po)["accepted"])
+        documents = self.what_the_supplier_made_of_it()
+        self.assertEqual([l.split("*")[2] for l in lines_of(documents["855"], "PO1")],
+                         ["0.125"])
+
+    def test_a_whole_number_is_written_without_a_point_or_an_exponent(self):
+        for raw, written in (("100.000", "100"), ("100", "100"), ("2.500", "2.5"),
+                             ("0.125", "0.125"), ("1000000.000", "1000000"),
+                             ("1E+2", "100"), (40, "40"), ("0.000", "0")):
+            with self.subTest(raw=raw):
+                self.assertEqual(po_bridge.x12_quantity(raw), written)
+
+
+class OneMailboxTwoReaders(unittest.TestCase):
+    """#8: the bridge and the invoice check each take only what they read.
+
+    Both collected the supplier's whole mailbox, and collecting takes a document
+    out of it. Whichever ran first took the other's documents and dropped them.
+    """
+
+    def setUp(self):
+        control(SAP, "POST", "/_mock/reset")
+        control(EDI, "POST", "/_mock/reset")
+        self.sap = Sap(SAP)
+        self.bridge = po_bridge.Bridge(po_bridge.Sap(SAP), EDI, our_id="ACME",
+                                       supplier_id="MOCKEDI")
+        self.check = InvoiceCheck(self.sap, EDI, our_id="ACME")
+        self.po = one_line_order(self.sap, "100")
+        self.assertTrue(self.bridge.send(self.po)["accepted"])
+
+    def test_the_bridge_first_leaves_the_invoice_to_be_checked(self):
+        self.assertEqual(list(self.bridge.receive()), [self.po])
+        [result] = self.check.run()
+        self.assertEqual((result["po"], result["status"]), (self.po, "posted"))
+
+    def test_the_check_first_leaves_the_confirmation_to_be_posted(self):
+        [result] = self.check.run()
+        self.assertEqual(result["status"], "posted")
+        confirmed = self.bridge.receive()
+        self.assertEqual(list(confirmed), [self.po])
+        self.assertEqual(confirmed[self.po]["exceptions"], [])
+
+    def test_what_neither_reads_is_still_in_the_mailbox(self):
+        """The 997 is nobody's here, and taking it would be throwing it away."""
+        self.bridge.receive()
+        self.check.run()
+        left = control(EDI, "GET", "/_mock/mailbox?partner=ACME&leave")
+        self.assertEqual([d["code"] for d in left], ["997"])
+
+
+class ASupplierThatChargesTax(unittest.TestCase):
+    """#8: mock-edi started with `--tax-rate`, which made every invoice blocked.
+
+    The 810's total includes the tax and its lines do not, so "lines add up to
+    X, invoice total is Y" was the answer to a correct invoice. The mock is
+    started here because the rate is a start-up option.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.taxing = tests.another("mockedi", ["--tax-rate", "0.0825"])
+
+    def setUp(self):
+        control(SAP, "POST", "/_mock/reset")
+        control(self.taxing, "POST", "/_mock/reset")
+        self.sap = Sap(SAP)
+        self.po = one_line_order(self.sap, "100")
+        self.assertTrue(send_order(self.sap, self.taxing, self.po, sender="ACME")["accepted"])
+
+    def test_the_supplier_really_does_charge_it(self):
+        """Or the test below passes against a mock that ignored the option."""
+        [invoice] = [d for d in control(self.taxing, "GET", "/_mock/mailbox?partner=ACME&leave")
+                     if d["code"] == "810"]
+        self.assertEqual(lines_of(invoice, "TDS", "TXI"), ["TDS*135313", "TXI*ST*103.13"])
+
+    def test_a_correct_taxed_invoice_is_posted_and_owed_in_full(self):
+        [result] = InvoiceCheck(self.sap, self.taxing, our_id="ACME").run()
+        self.assertEqual((result["status"], result["problems"]), ("posted", []))
+        q = urllib.parse.urlencode({
+            "$filter": "AccountingDocument eq '%s'" % result["accounting_document"],
+            "$format": "json"})
+        rows = self.sap.request(
+            "GET", "/sap/opu/odata/sap/API_OPLACCTGDOCITEMCUBE_SRV"
+                   "/A_OperationalAcctgDocItemCube?" + q)["d"]["results"]
+        booked = sorted((row["AccountingDocumentItemType"], row.get("GLAccount") or "",
+                         abs(Decimal(row["AmountInTransactionCurrency"])))
+                        for row in rows)
+        # Owed gross; the expense and the input tax booked apart, not the tax
+        # expensed with the goods.
+        self.assertEqual(booked, [("K", "", Decimal("1353.13")),
+                                  ("S", "0000154000", Decimal("103.13")),
+                                  ("S", "0000400000", Decimal("1250.00"))])
+
+
+class ReadingTaxFromAnInvoice(unittest.TestCase):
+    """The 810 reader and the match on their own, with no mock involved."""
+
+    INVOICE = ("ST*810*0001~BIG*20261005*INV-1**4500000001~CUR*SE*USD~"
+               "IT1*00010*100*EA*12.50**VP*WIDGET-001~TDS*135313~%sCTT*1~SE*8*0001~")
+    PO = {"Supplier": "1000012", "DocumentCurrency": "USD", "to_PurchaseOrderItem": {
+        "results": [{"PurchaseOrderItem": "00010", "NetPriceAmount": "12.50"}]}}
+
+    def check(self, invoice):
+        check = InvoiceCheck(None, "", "ACME")
+        check.shipped = {"4500000001": {"00010": Decimal("100")}}
+        return check.problems(invoice, self.PO)
+
+    def test_an_invoice_without_tax_reads_as_no_tax(self):
+        invoice = read_810(self.INVOICE.replace("135313", "125000") % "")
+        self.assertEqual(invoice["tax"], Decimal("0.00"))
+        self.assertEqual(self.check(invoice), [])
+        self.assertNotIn("<SUMID>205</SUMID>", invoic_idoc(invoice, self.PO))
+        self.assertNotIn("<SUMID>011</SUMID>", invoic_idoc(invoice, self.PO))
+
+    def test_the_tax_is_added_in_before_the_total_is_compared(self):
+        invoice = read_810(self.INVOICE % "TXI*ST*103.13~")
+        self.assertEqual(invoice["tax"], Decimal("103.13"))
+        self.assertEqual(self.check(invoice), [])
+
+    def test_two_taxes_are_both_counted(self):
+        invoice = read_810(self.INVOICE % "TXI*ST*100.00~TXI*CT*3.13~")
+        self.assertEqual(invoice["tax"], Decimal("103.13"))
+        self.assertEqual(self.check(invoice), [])
+
+    def test_a_taxed_total_that_still_does_not_add_up_is_blocked_and_says_both(self):
+        invoice = read_810(self.INVOICE % "TXI*ST*100.00~")
+        self.assertEqual(self.check(invoice), [
+            "lines add up to 1250.00 and tax to 100.00, invoice total is 1353.13"])
+
+    def test_tax_that_is_not_on_the_invoice_is_not_assumed(self):
+        """A total above its lines with no TXI is a wrong total, not hidden tax."""
+        invoice = read_810(self.INVOICE % "")
+        self.assertEqual(self.check(invoice), [
+            "lines add up to 1250.00, invoice total is 1353.13"])
+
+    def test_sap_is_told_the_net_the_tax_and_the_gross_apart(self):
+        idoc = invoic_idoc(read_810(self.INVOICE % "TXI*ST*103.13~"), self.PO)
+        for sumid, amount in (("010", "1353.13"), ("011", "1250.00"), ("205", "103.13")):
+            self.assertIn("<SUMID>%s</SUMID><SUMME>%s</SUMME>" % (sumid, amount), idoc)
+
 
 if __name__ == "__main__":
     unittest.main()
