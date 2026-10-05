@@ -10,6 +10,14 @@ says so where it does.
 
 ### Added
 
+- **`ProcureToPay.advise` tells the supplier what was paid** ([#15]). The loop
+  ended with SAP and the bank agreeing and the supplier not told. `advise`
+  takes a reconciled run, asks SAP for the payment advice of each payment it
+  cleared, and sends each on as an X12 820 through `remittance`, one per
+  payment document. It returns what the supplier made of each, disagreements
+  included. A payment the bank refused, or one not yet on a statement, is not
+  advised. A payment that later comes back is not corrected: no reversing 820
+  is sent.
 - **`ProcureToPay` takes the payment run's register** ([#2]).
   `ProcureToPay(..., register=Register(path))` hands it to the `PaymentRun` it
   builds. Without this the register kept in a file, which is the one a
@@ -122,3 +130,4 @@ These differ from the last copies the mocks carried.
 [#8]: https://github.com/rseufert/mock-acme/issues/8
 [#12]: https://github.com/rseufert/mock-acme/issues/12
 [#13]: https://github.com/rseufert/mock-acme/issues/13
+[#15]: https://github.com/rseufert/mock-acme/issues/15

@@ -17,7 +17,8 @@ been there throughout.
 
 Each test runs a whole purchase: a purchase order in SAP, an 850 to the supplier,
 the supplier's answers, the three-way match, the posting, a payment run and a
-statement. That is slower to arrange than a two-mock test and it is the only way
+statement, and in `TestTheSupplierIsTold` the remittance advice that follows.
+That last step needs **mock-sap 0.17.0**, the first that generates the advice. That is slower to arrange than a two-mock test and it is the only way
 to see the failures here, all of which live between a pair of mocks that each
 believe they are fine.
 
@@ -504,6 +505,126 @@ class TestWhenTheBankSaysNo(PurchaseCase):
                          "nothing cleared it")
         self.assertEqual(row["ClearingIsReversed"], False,
                          "never paid is not the same as paid and returned")
+
+
+
+class TestTheSupplierIsTold(PurchaseCase):
+    """The last step: the supplier hears what the payment was for (#15).
+
+    Until this, the loop ended with SAP and the bank agreeing and the supplier
+    none the wiser. `advise` sends the supplier an 820 for each payment a run
+    cleared, and the supplier - mock-edi, reading as the payee - says whether it
+    agrees. A clean answer only means something beside the ones that are not.
+    """
+
+    def supplier_clock_reaches(self, day):
+        """Move the supplier's clock to the end of `day`. It only moves forward."""
+        now = datetime.datetime.fromisoformat(
+            control(EDI, "POST", "/_mock/advance?seconds=0")["clock"])
+        target = datetime.datetime.combine(day, datetime.time(23, 59, 59), now.tzinfo)
+        seconds = int((target - now).total_seconds())
+        if seconds > 0:
+            control(EDI, "POST", "/_mock/advance?seconds=%d" % seconds)
+
+    def settles(self, told):
+        return datetime.datetime.strptime(told["advice"]["settles"], "%Y%m%d").date()
+
+    def a_cleared_purchase(self):
+        self.purchase()
+        [approved] = self.p2p.approve()
+        run = self.pay_what_is_due()
+        self.assertEqual([i.status for i in run.items], ["cleared"])
+        return approved, run
+
+    def advise(self, run):
+        self.control_number += 1
+        return self.p2p.advise(run, sender="ACME", control=self.control_number)
+
+    def only_message(self, told):
+        [message] = told["receipt"]["transactionSets"]
+        return message
+
+    def test_5_the_supplier_is_told_and_agrees(self):
+        approved, run = self.a_cleared_purchase()
+        # The advice is dated by the bank's day. The supplier's clock has to
+        # have reached it, which is the next test's subject.
+        self.supplier_clock_reaches(self.bank_today())
+
+        [told] = self.advise(run)
+
+        message = self.only_message(told)
+        self.assertEqual(message["code"], "820")
+        self.assertTrue(message["accepted"], message["findings"])
+        self.assertEqual((message["findings"], message["disagreements"]), ([], []))
+        # It names the invoice by the supplier's own number, which is the only
+        # number the supplier can look up.
+        self.assertEqual(told["advice"]["invoices"],
+                         [{"reference": approved["invoice"], "amount": Decimal("1250.00")}])
+        self.assertEqual((told["advice"]["total"], told["advice"]["currency"]),
+                         (Decimal("1250.00"), "EUR"))
+        # And the supplier has it on file under the payment it advises.
+        [filed] = [row for row in control(EDI, "GET", "/_mock/remittances")
+                   if row["trace"] == run.items[0].reason]
+        self.assertEqual((filed["total"], filed["creditDebit"]), ("1250.00", "C"))
+        self.assertIs(filed["settledOnArrival"], True)
+
+    def test_a_supplier_whose_clock_is_behind_the_banks_says_the_money_is_not_there(self):
+        """Three mocks, three clocks, and the advice carries the bank's day.
+
+        The payment was made on its due date, about a month out, so the bank's
+        clock is a month ahead of the supplier's. An advice dated by the day the
+        payment settled is, to the supplier, an advice for a day that has not
+        come. In production the three systems share a calendar and this never
+        shows; a test that moves one clock has to move the others.
+        """
+        _, run = self.a_cleared_purchase()
+
+        [told] = self.advise(run)
+
+        message = self.only_message(told)
+        self.assertTrue(message["accepted"], "a readable document is acknowledged")
+        self.assertEqual([d["rule"] for d in message["disagreements"]],
+                         ["remitted-before-settlement"])
+        self.assertGreater(self.settles(told), datetime.date.today())
+
+    def test_a_payment_the_bank_refused_is_not_advised(self):
+        self.purchase(supplier=INITECH)
+        self.p2p.approve()
+        run = self.pay_what_is_due()
+        self.assertEqual([i.status for i in run.items], ["rejected"])
+
+        self.assertEqual(self.advise(run), [])
+        self.assertEqual(control(EDI, "GET", "/_mock/remittances"), [])
+
+    def test_a_payment_not_yet_on_a_statement_is_not_advised(self):
+        """Accepted is not paid, and the supplier is told about paid."""
+        self.purchase()
+        self.p2p.approve()
+        due = self.p2p.last_due_date()
+        self.advance_bank_to(due)
+        run = self.p2p.pay(max(due, self.bank_today()), "RUN1")
+        self.assertEqual([i.status for i in run.items], ["accepted"])
+
+        self.assertEqual(self.advise(run), [])
+        self.assertEqual(control(EDI, "GET", "/_mock/remittances"), [])
+
+    def test_two_invoices_paid_together_are_one_advice(self):
+        """One payment document per supplier, so one advice naming both."""
+        self.purchase(quantity="100")
+        self.purchase(quantity="40")
+        approved = self.p2p.approve()
+        self.assertEqual([r["status"] for r in approved], ["posted", "posted"])
+        run = self.pay_what_is_due()
+        self.assertEqual(sorted(i.status for i in run.items), ["cleared", "cleared"])
+        self.assertEqual(len({i.reason for i in run.items}), 1, "one clearing document")
+        self.supplier_clock_reaches(self.bank_today())
+
+        [told] = self.advise(run)
+
+        self.assertEqual(sorted(row["reference"] for row in told["advice"]["invoices"]),
+                         sorted(r["invoice"] for r in approved))
+        self.assertEqual(told["advice"]["total"], Decimal("1750.00"))
+        self.assertEqual(self.only_message(told)["disagreements"], [])
 
 
 if __name__ == "__main__":
