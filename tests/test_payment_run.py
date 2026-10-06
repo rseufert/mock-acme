@@ -437,11 +437,15 @@ class MoneyArriving(StatementCase):
         self.assertEqual(self.clearing("GLX-4711"), cleared_by)
         self.assertEqual(self.by_reference(run)["GLX-4711"].status, "cleared")
         self.assertEqual(self.payments.select(self.bank_today()), [])
-        # And said out loud, because the reference was withheld from SAP.
-        said = [p for p in run.problems if "GLX-4711" in p]
-        self.assertEqual(len(said), 1, run.problems)
-        self.assertIn("money arriving", said[0])
-        self.assertIn("1190.00", said[0])
+        # SAP was given the reference, and it is what the credit says it is
+        # that kept the invoice paid (#18): SAP's own answer is that the line
+        # is money arriving, which it does not post yet (mock-sap#65).
+        self.assertIn("<LINACTION>RCV</LINACTION>", carrying[0]["finsta"])
+        self.assertEqual(carrying[0]["finsta"].count("<BELNR>GLX-4711</BELNR>"), 1)
+        self.assertEqual(len(carrying[0]["unprocessed"]), 1, carrying[0])
+        self.assertIn("money arriving", carrying[0]["unprocessed"][0]["REASON"])
+        # Nothing was held back, so the run has no problem to report for it.
+        self.assertEqual([p for p in run.problems if "GLX-4711" in p], [])
 
     def test_a_return_beside_money_arriving_still_reopens_its_invoice(self):
         # The other half: telling the two apart must not stop a real return.
@@ -470,9 +474,9 @@ class WhatACreditSaysItIs(unittest.TestCase):
     """#18: each credit on the FINSTA01 declares itself a return or a receipt.
 
     The sign says money came in and nothing more. mock-sap reads the
-    declaration from the release after 0.18.0, and there a credit that makes
-    none reverses nothing - so a return that did not say so would stop
-    reopening its invoice. With no mock running: this is what is written.
+    declaration from 0.19.0, and there a credit that makes none reverses
+    nothing - so a return that did not say so would stop reopening its
+    invoice. With no mock running: this is what is written.
     """
 
     def lines(self):
@@ -491,12 +495,12 @@ class WhatACreditSaysItIs(unittest.TestCase):
         self.assertIn("<LINACTION>RET</LINACTION>", back)
         self.assertIn("<BELNR>BACK-1</BELNR>", back)
 
-    def test_money_arriving_says_rcv(self):
+    def test_money_arriving_says_rcv_and_keeps_its_reference(self):
         _, _, arrived = self.lines()
         self.assertIn("<LINACTION>RCV</LINACTION>", arrived)
-        # Still without its reference, for a mock-sap that does not read the
-        # declaration and would reopen an invoice on the reference alone.
-        self.assertNotIn("IN-1", arrived)
+        # The reference is what SAP will clear a receivable by (mock-sap#65).
+        # It was left off until a mock-sap that reads the declaration was out.
+        self.assertIn("<BELNR>IN-1</BELNR>", arrived)
 
     def test_a_debit_says_nothing_because_it_has_one_reading(self):
         out, _, _ = self.lines()

@@ -757,13 +757,6 @@ class PaymentRun:
                   "adds_up": opening + moved == closing,
                   "finsta": self.finsta(number, day, opening, closing, lines,
                                         statement["currency"])}
-        for line in lines:
-            if received(line) and line["end_to_end_id"]:
-                run.problems.append(
-                    "statement %s for %s has a credit of %s quoting %s that is money "
-                    "arriving, not a payment coming back; it was posted to SAP "
-                    "without that reference, so that SAP does not reopen an invoice "
-                    "it names" % (number, day, line["amount"], line["end_to_end_id"]))
         try:
             applied = self.session.post_idoc(record["finsta"])
         except urllib.error.HTTPError as error:
@@ -865,19 +858,17 @@ class PaymentRun:
         that are opposites - a payment of ours coming back, which reopens the
         invoice it paid, and money arriving, which reverses nothing - and the
         sign cannot tell them apart. Each credit line carries `LINACTION`:
-        `RET` for a return, `RCV` for a receipt. mock-sap reads it from the
-        release after 0.18.0 (mock-sap#89), where a credit that declares
-        neither reverses nothing; up to 0.18.0 the field is ignored and any
-        credit quoting a cleared invoice reopens it.
+        `RET` for a return, `RCV` for a receipt. mock-sap reads it from 0.19.0
+        (mock-sap#89), where a credit that declares neither reverses nothing.
 
-        **Money arriving is still written without its reference** (#2), for
-        that second kind of mock-sap. The reference is the one thing that
-        would make it reopen an invoice, so it is left out, and
-        `post_statement` says so as a problem. The line is still there with its
-        amount, so the statement adds up. Against a mock-sap that reads
-        `LINACTION` this is no longer needed, and it is what has to go when SAP
-        clears receivables (mock-sap#65), which need that reference. It stays
-        until this package requires such a mock-sap.
+        **Money arriving carries its reference too** (#18), and it is the
+        declaration that keeps SAP from reopening the invoice it quotes. So
+        this needs mock-sap 0.19.0 or later: up to 0.18.0 the field is ignored
+        and any credit quoting a cleared invoice reopens it, which is why the
+        reference was left off these lines until 0.19.0 was out (#2). mock-sap
+        answers such a line under `UNPROCESSED` and says why, and that is on
+        the statement's record; posting money in is mock-sap#65, which needs
+        this reference to clear a receivable by.
 
         The currency is the statement's own, on every amount and on the
         account. It was `EUR` whatever the account held, and a dollar statement
@@ -894,7 +885,7 @@ class PaymentRun:
 
         body = []
         for position, line in enumerate(lines, 1):
-            reference = "" if received(line) else (
+            reference = (
                 "<E1EDP02 SEGMENT=\"1\"><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDP02>"
                 % escape(line["end_to_end_id"]))
             # Not on a debit: money out has one reading, and SAP does not look.
@@ -1147,11 +1138,6 @@ def unanswered(side: str, consequence: str, error) -> str:
     """A host that did not answer at all, named, and what that left undone."""
     return "%s did not answer, so %s: %s" % (side, consequence,
                                               getattr(error, "reason", error))
-
-
-def received(line: Dict) -> bool:
-    """A credit that is money arriving rather than a payment coming back."""
-    return line["side"] == "CRDT" and not line["returned"]
 
 
 def signed(amount: str, side: str) -> Decimal:

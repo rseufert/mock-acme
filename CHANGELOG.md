@@ -8,7 +8,21 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+**`payment_run` now needs mock-sap 0.19.0 or later.** Against an older one, a
+customer's payment quoting an invoice already paid reopens that invoice, and
+the next run pays the supplier a second time.
+
+### Changed
+
+- **Money arriving is posted to SAP with the reference it quotes** (#18). It
+  was left off, so that a mock-sap that could not tell a receipt from a return
+  did not reopen an invoice on it. Since 0.2.0 each credit says which it is,
+  and mock-sap reads that from 0.19.0, so the reference is back: it is what
+  SAP will clear a receivable by (rseufert/mock-sap#65).
+- **A run no longer reports money arriving as a problem.** The problem said a
+  reference had been withheld, and none is. What SAP made of the line is on the
+  statement's record, under `unprocessed`, in SAP's own words.
+- The test extra requires `mock-sap>=0.19.0`, from 0.17.0.
 
 ## [0.2.0] - 2026-10-05
 
