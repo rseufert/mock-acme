@@ -36,6 +36,10 @@ python3 -m pip install mock-acme
 That installs the package and nothing else. The mocks it talks to are separate:
 `pip install mock-sap mock-edi mock-bank`.
 
+`payment_run` needs **mock-sap 0.19.0 or later**. Against an older one, a
+customer's payment that quotes the number of an invoice already paid reopens
+that invoice, and the next run pays the supplier again.
+
 ## Running the tests
 
 From a checkout:
@@ -97,11 +101,11 @@ That is one company's own record and not SAP's, and it has edges:
 - Whoever posts the statements needs the same register, or its entries are
   never let go.
 
-Money arriving is posted to SAP without the reference it quotes, so that SAP
-does not take it for a returned payment and reopen an invoice. That is a
-stopgap, said as a problem on the run each time it happens, until the FINSTA01
-has a way to tell the two apart
-([mock-sap#89](https://github.com/rseufert/mock-sap/issues/89)).
+Money arriving is posted to SAP and nothing comes of it. Each credit on the
+statement says whether it is a payment coming back or money arriving, so SAP
+no longer takes a receipt for a return, but posting it against a receivable is
+not built ([mock-sap#65](https://github.com/rseufert/mock-sap/issues/65)). SAP
+answers the line as unprocessed, and that is on the statement's record.
 
 ## Releasing
 
