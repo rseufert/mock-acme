@@ -88,6 +88,12 @@ OPEN_SUPPLIER_ITEMS = ("AccountingDocumentItemType eq 'K' and "
                        "ClearingAccountingDocument eq '' and "
                        "PaymentBlockingReason eq ''")
 
+# SAP's key for a payment run is the pair F110 asks for: an identification of up
+# to six characters (`LAUFI`) and the run date (`LAUFD`). A run writes both on
+# each invoice it is about to pay, SAP carries them to the open item, and that
+# is how the next run knows the item is in flight (mock-sap#90).
+RUN_ID_LENGTH = 6
+
 # What a credit line on a FINSTA01 declares itself to be, in `E1IDPF1-LINACTION`
 # (mock-sap#89): a payment of ours coming back, or money arriving.
 RETURNED, RECEIVED = "RET", "RCV"
@@ -136,6 +142,11 @@ def odata(base: str, path: str, **query) -> List[Dict]:
     return rows
 
 
+def to_sap_date(day: datetime.date) -> str:
+    """A date as OData V2 writes one in JSON: `/Date(1788220800000)/`."""
+    return "/Date(%d)/" % ((day - datetime.date(1970, 1, 1)).days * 86400000)
+
+
 def sap_date(raw: str) -> Optional[datetime.date]:
     """OData V2's `/Date(1788220800000)/`, as a date."""
     found = re.search(r"-?\d+", raw or "")
@@ -146,12 +157,16 @@ def sap_date(raw: str) -> Optional[datetime.date]:
 
 
 class Register:
-    """What has been sent to a bank and is not yet settled: the in-payment state.
+    """The run's own copy of what it has sent to a bank and is not yet settled.
 
-    SAP's open-item list cannot say "selected for payment" (mock-sap#90). Until
-    it can, the only place that fact can live is with whoever did the paying,
-    and it has to outlive the `Run` object, or a second run started before the
-    statement arrives pays the same invoice again (#2).
+    **SAP holds this now, and a run does not need a register.** From mock-sap
+    0.19.0 the open item itself says which payment run has it in flight
+    (mock-sap#90), `PaymentRun` writes that before a file goes out, and every
+    other run reads it, whichever machine or program it is. This class is from
+    before SAP could say so (#2), when the only place the fact could live was
+    with whoever did the paying. It is kept for a caller that already passes
+    one, and it adds one thing: a record that is the caller's own, which holds
+    even if somebody takes the claim off the invoice in SAP.
 
     One entry per open item, keyed by `company code/fiscal year/accounting
     document`, saying which run's file carries it. An entry is written **before**
@@ -171,14 +186,14 @@ class Register:
 
     `Register(path)` keeps the entries in a JSON file, rewritten whole and
     swapped into place on every change. `Register()` keeps them in memory, which
-    protects one process and nothing else: **a payment program that is started
-    again each day needs a path.**
+    covers one process and nothing else.
 
-    What this does not do. It is one company's own record, not SAP's: a second
-    installation with a second register pays twice, and so do two processes
-    writing one file at the same moment, which nothing here locks. Whoever posts
-    the statements has to be given the same register, or its entries are never
-    cleared. mock-sap#90 is the fix for all three.
+    What it costs. It is a second record of one fact, and it is let go by this
+    code where SAP's is let go by SAP. **Whoever posts the statements has to be
+    given the same register, or an entry outlives the claim**: SAP clears the
+    item, the payment comes back, SAP reopens it free to pay, and the run with
+    the old entry still leaves it alone. Two processes writing one file at the
+    same moment are not kept apart either; nothing here locks it.
     """
 
     def __init__(self, path: Optional[str] = None):
@@ -252,6 +267,9 @@ class Item:
     status: str = "selected"    # selected, skipped, sent, accepted, rejected,
                                 # cleared, unreconciled, returned
     reason: str = ""            # a reason code from the bank, or why it was skipped
+    invoice: str = ""           # supplier invoice/fiscal year: where a claim is written
+    run_id: str = ""            # the payment run SAP says has it in flight, if any,
+    run_date: str = ""          # and that run's date
 
 
 @dataclass
@@ -306,16 +324,28 @@ class PaymentRun:
     reason an ACH payment came back is in the bank's NACHA return file:
     `reconcile` reads all three into the same statement (mock-bank#57).
 
-    `register` is where the run records what it has sent, so that the next run
-    does not pay it again (#2). Give every `PaymentRun` that pays from or
-    reconciles the same account the same one.
+    **An item a run has sent is not paid again by another** (#2, #21). Before
+    a file goes out, the run writes its identification and date on each
+    invoice in it, as `PaymentRunID` and `PaymentRunDate`; SAP carries them to
+    the open item, and a run that finds another run's there leaves the item
+    alone and says whose it is. SAP takes the claim off when a statement clears
+    the item and when a payment that came back reopens it. The run takes it off
+    when the bank refuses the payment, which SAP cannot see. So `identification`
+    is one to six characters, SAP's own limit for it, and this needs mock-sap
+    0.19.0 or later.
+
+    What that does not do: reading the open items and writing the claim are
+    two requests, and two runs that both read before either writes both pay.
+    It narrows that window to the moment of selection; it does not close it.
+
+    `register` is optional: the run's own copy of the same fact, from before
+    SAP could hold it. See `Register` for what it adds and what it costs.
     """
 
     def __init__(self, sap: str, bank: str, company: Dict[str, str],
                  file_format: str = "iso20022", register: Optional[Register] = None):
-        # In memory unless told otherwise, which covers this object's own runs
-        # and no others. `Register` says why a real one is given a path.
-        self.register = register if register is not None else Register()
+        # None unless given one: SAP's open item is where "in payment" lives.
+        self.register = register
         self.sap = sap
         self.bank = bank
         self.company = company
@@ -328,13 +358,13 @@ class PaymentRun:
     def run(self, run_on: datetime.date, identification: str) -> Run:
         run = Run(run_on, identification,
                   nacha_origin=self.company["company_id"] if self.nacha else "")
-        if self.nacha:
-            refusal = self.nacha_refusal(identification)
-            if refusal:
-                # Nothing selected is nothing paid; the file could not have
-                # been told apart from another, or could not be written.
-                run.problems.append(refusal + ", so no open item was selected")
-                return run
+        refusal = self.refusal(identification)
+        if refusal:
+            # Nothing selected is nothing paid; the run could not have said
+            # in SAP which run it is, or its file could not have been told
+            # apart from another, or could not be written.
+            run.problems.append(refusal + ", so no open item was selected")
+            return run
         try:
             run.items = self.select(run_on)
         except urllib.error.HTTPError as error:
@@ -352,17 +382,34 @@ class PaymentRun:
         self.read_status(run)
         return run
 
+    def refusal(self, identification: str) -> str:
+        """Why a run cannot go by this identification, or ""."""
+        if not 1 <= len(identification) <= RUN_ID_LENGTH:
+            return ("identification %r is not one to %d characters, which is what "
+                    "SAP's key for a payment run holds" % (identification, RUN_ID_LENGTH))
+        return self.nacha_refusal(identification) if self.nacha else ""
+
     def hold_back(self, run: Run) -> None:
         """Leave alone what another run has already sent to the bank (#2).
 
         SAP still lists the item as open, because nothing clears it until the
-        statement is posted. The run that holds it is not held back from its
-        own items: sending its file again is how a run that got no answer finds
-        out whether the bank has it, and the bank refuses a copy.
+        statement is posted; what it says instead is which run has it. The run
+        that holds it is not held back from its own items: sending its file
+        again is how a run that got no answer finds out whether the bank has
+        it, and the bank refuses a copy.
         """
+        ours = (run.identification, run.run_on.isoformat())
         for item in run.items:
-            held = self.register.holder(item.document)
-            if item.status == "selected" and held and held["msg_id"] != run.msg_id:
+            if item.status != "selected":
+                continue
+            if item.run_id and (item.run_id, item.run_date) != ours:
+                item.status = "skipped"
+                item.reason = ("in payment: SAP has it with payment run %s of %s, and "
+                               "it has not been cleared or refused since"
+                               % (item.run_id, item.run_date or "no date"))
+                continue
+            held = self.register.holder(item.document) if self.register else None
+            if held and held["msg_id"] != run.msg_id:
                 item.status = "skipped"
                 item.reason = ("in payment: %s carried it to the bank on %s and it "
                                "has not been cleared or refused since"
@@ -401,8 +448,11 @@ class PaymentRun:
                                                row["AccountingDocument"]),
                         supplier=row["Supplier"], due_on=due.isoformat(),
                         currency=row["TransactionCurrency"],
+                        run_id=row.get("PaymentRunID") or "",
                         amount=str(abs(Decimal(row["AmountInTransactionCurrency"]))
                                    .quantize(Decimal("0.01"))))
+            claimed_on = sap_date(row.get("PaymentRunDate"))
+            item.run_date = claimed_on.isoformat() if claimed_on else ""
             self.complete(item, row)
             items.append(item)
         items.sort(key=lambda i: (i.supplier, i.reference, i.document))
@@ -424,6 +474,7 @@ class PaymentRun:
             item.status, item.reason = "skipped", "no supplier invoice for this item"
             return
         invoice = invoices[0]
+        item.invoice = "%s/%s" % (invoice["SupplierInvoice"], invoice["FiscalYear"])
         item.reference = invoice["SupplierInvoiceIDByInvcgParty"]
         if not item.reference:
             item.status, item.reason = "skipped", "the invoice has no supplier reference"
@@ -490,11 +541,14 @@ class PaymentRun:
     # -- 2. send ---------------------------------------------------------------
 
     def send(self, run: Run) -> None:
+        # Before the file goes, not after: a crash between the two leaves an
+        # item held back rather than free to be paid twice.
+        self.claim(run)
         paying = [i for i in run.items if i.status == "selected"]
         if not paying:
             return
-        # Before the file goes, not after: see `Register`.
-        self.register.hold(paying, run)
+        if self.register:
+            self.register.hold(paying, run)
         run.http_status, body = call(
             self.bank, "POST", "/payments",
             self.nacha_file(run, paying) if self.nacha else self.payment_file(run, paying),
@@ -514,6 +568,51 @@ class PaymentRun:
                                 % (run.http_status, body.decode("utf-8", "replace")[:200]))
         for item in paying:
             item.status = "sent"
+
+    def claim(self, run: Run) -> None:
+        """Say in SAP, on each invoice about to be paid, that this run has it.
+
+        An item whose claim SAP did not take is not sent. Paying it would be
+        paying something no other run can see is in flight, which is the
+        second payment this exists to prevent.
+        """
+        for item in run.items:
+            if item.status != "selected" or item.run_id:
+                continue    # not being paid, or this run's own from last time
+            said = self.write_claim(item, run.identification, to_sap_date(run.run_on))
+            if said:
+                item.status = "skipped"
+                item.reason = "not claimed in SAP, so not sent: %s" % said
+                run.problems.append("%s was not paid: %s" % (item.reference, said))
+            else:
+                item.run_id, item.run_date = run.identification, run.run_on.isoformat()
+
+    def let_go(self, run: Run, item: Item) -> None:
+        """Take this run's claim off an item the bank refused: it is owed."""
+        said = self.write_claim(item, "", None)
+        if said:
+            run.problems.append(
+                "the bank refused %s, but it is still marked in SAP as in payment "
+                "with run %s of %s, so no run will select it until that is taken "
+                "off: %s" % (item.reference, item.run_id, item.run_date, said))
+        else:
+            item.run_id = item.run_date = ""
+
+    def write_claim(self, item: Item, identification: str, date: Optional[str]) -> str:
+        """Write a run's key on an invoice, or take it off. "" or what went wrong."""
+        number, year = item.invoice.split("/")
+        try:
+            self.session.write(
+                "PATCH", "%s(SupplierInvoice='%s',FiscalYear='%s')" % (INVOICES, number, year),
+                json.dumps({"PaymentRunID": identification, "PaymentRunDate": date}),
+                "application/json")
+        except urllib.error.HTTPError as error:
+            return "SAP answered %d to the payment run on invoice %s: %s" % (
+                error.code, number, error.read().decode("utf-8", "replace")[:200])
+        except (urllib.error.URLError, OSError) as error:
+            return unanswered("SAP", "the payment run was not written on invoice %s"
+                              % number, error)
+        return ""
 
     def payment_file(self, run: Run, items: List[Item]) -> str:
         ET.register_namespace("", PAIN001)
@@ -605,10 +704,13 @@ class PaymentRun:
         else:
             self.read_status_reports(run)
         # A payment the bank refused moved no money, so the item is owed and
-        # free for the next run. Everything else stays held.
+        # free for the next run. SAP cannot see a refusal, so the run takes its
+        # own claim off. Everything else stays held.
         for item in run.paying():
             if item.status == "rejected":
-                self.register.release(item.document)
+                self.let_go(run, item)
+                if self.register:
+                    self.register.release(item.document)
 
     def read_status_reports(self, run: Run) -> None:
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=pain.002")
@@ -798,10 +900,11 @@ class PaymentRun:
             return by_document.get(document)
 
         for line in record["cleared"]:
-            # SAP's own list now says the item is paid, so the register's entry
-            # has done its work - whichever run sent it, which is why this goes
-            # by SAP's document number and not by this run's items.
-            if line.get("ACCOUNTINGDOCUMENT"):
+            # SAP's own list now says the item is paid, and SAP has taken the
+            # run's claim off it. A register's entry has done its work too -
+            # whichever run sent it, which is why this goes by SAP's document
+            # number and not by this run's items.
+            if self.register and line.get("ACCOUNTINGDOCUMENT"):
                 self.register.release(line["ACCOUNTINGDOCUMENT"])
             item = attributed(line, "cleared")
             if item is not None and item.status == "accepted":

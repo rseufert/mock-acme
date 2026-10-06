@@ -8,11 +8,39 @@ says so where it does.
 
 ## [Unreleased]
 
-**`payment_run` now needs mock-sap 0.19.0 or later.** Against an older one, a
-customer's payment quoting an invoice already paid reopens that invoice, and
-the next run pays the supplier a second time.
+**`payment_run` now needs mock-sap 0.19.0 or later**, and a second payment
+run no longer pays an invoice again whoever starts it: the run says in SAP
+which run has each item. Against an older mock-sap the run pays nothing,
+because SAP refuses the field it writes that in.
+
+**Three behaviours change for a caller.** A run's identification must be one
+to six characters. A `PaymentRun` given no `register` has none, where it kept
+one in memory. And a second run is held back with no register at all.
+
+### Added
+
+- **A run claims each item in SAP before it sends the file** (#21). It writes
+  its identification and date on the invoice, as `PaymentRunID` and
+  `PaymentRunDate`, which mock-sap carries to the open item from 0.19.0
+  (rseufert/mock-sap#90). A run that finds another run's claim skips the item
+  and names that run. SAP takes the claim off when a statement clears the item
+  or a returned payment reopens it; the run takes it off when the bank refuses
+  the payment. `Item` carries `run_id`, `run_date` and `invoice`.
+- An item SAP would not take the claim for is skipped, not sent, and is a
+  problem on the run.
 
 ### Changed
+
+- **A run's identification is one to six characters**, SAP's limit for it.
+  Anything else is refused before an open item is selected. It was any string
+  outside NACHA mode.
+- **`Register` is optional and no longer needed.** `PaymentRun(...)` and
+  `ProcureToPay(...)` without one keep no record of their own, where they kept
+  one in memory. A caller that passes one gets what it did before, beside the
+  claim: asked after SAP, and let go of by this code. Its docstring says what
+  a second record costs.
+- The reason on an item another run holds reads `in payment: SAP has it with
+  payment run R1 of 2026-10-05, ...`. It named the file's `MsgId`.
 
 - **Money arriving is posted to SAP with the reference it quotes** (#18). It
   was left off, so that a mock-sap that could not tell a receipt from a return

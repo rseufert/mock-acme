@@ -257,13 +257,12 @@ class TestOnePurchase(PurchaseCase):
 
 
 class TestTheMiddlewareRestartedBeforeTheStatement(PurchaseCase):
-    """The payment run's register, reached through `ProcureToPay` (#2).
+    """A restart between paying and the statement does not pay again (#2, #21).
 
-    The run records what it has sent to the bank, so that a second run before
-    the statement does not pay it again. That only helps a restarted middleware
-    if the record is somewhere a restart does not lose, and `ProcureToPay`
-    builds its own `PaymentRun`: without a way to hand it a register, the
-    durable one could not be had from here at all.
+    The payment run says in SAP which run has an item, before its file goes,
+    so middleware started again finds that there with nothing kept of its own.
+    A caller's `Register` is still handed through to the run `ProcureToPay`
+    builds, for whoever passes one.
     """
 
     def setUp(self):
@@ -293,15 +292,17 @@ class TestTheMiddlewareRestartedBeforeTheStatement(PurchaseCase):
         self.assertEqual(held.status, "skipped")
         self.assertIn("in payment", held.reason)
 
-    def test_without_one_the_restart_pays_again(self):
-        """What leaving `register` out means, stated: memory does not restart."""
+    def test_without_one_the_restart_does_not_pay_again_either(self):
+        """Nothing is kept by the middleware: SAP's open item says who has it."""
         first = self.middleware()
         run_on = self.approved_and_due(first)
         self.assertEqual([i.status for i in first.pay(run_on, "RUN1").items], ["accepted"])
 
         restarted = self.middleware()
-        self.assertEqual([i.status for i in restarted.pay(run_on, "RUN2").items],
-                         ["accepted"])
+        self.assertIsNone(restarted.payments.register)
+        [held] = restarted.pay(run_on, "RUN2").items
+        self.assertEqual(held.status, "skipped")
+        self.assertIn("payment run RUN1 of %s" % run_on.isoformat(), held.reason)
 
     def test_the_statement_lets_go_of_it_whichever_middleware_posts_it(self):
         first = self.middleware(register=Register(self.path))

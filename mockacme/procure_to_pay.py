@@ -148,11 +148,11 @@ class ProcureToPay:
     difference between them is a scenario rather than a setting somebody should
     pick by taste. `False` is `invoice_check` as it ships.
 
-    `register` is the payment run's record of what it has sent to the bank and
-    not yet seen settled (`payment_run.Register`). Left out, it is kept in
-    memory, which is right for one process that pays and reconciles and exits.
-    Middleware that is started again each day passes `Register(path)`, or the
-    run after a restart pays what the run before it already sent.
+    `register` is handed to the payment run and is optional. The run says in
+    SAP which run has each item it sends, so middleware started again does not
+    pay what the run before it sent, with nothing kept here. A
+    `payment_run.Register` is the caller's own second record of that; see it
+    for what it adds and what it costs.
     """
 
     def __init__(self, sap: str, edi: str, bank: str, our_id: str,
