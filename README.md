@@ -36,9 +36,10 @@ python3 -m pip install mock-acme
 That installs the package and nothing else. The mocks it talks to are separate:
 `pip install mock-sap mock-edi mock-bank`.
 
-`payment_run` needs **mock-sap 0.19.0 or later**. Against an older one, a
-customer's payment that quotes the number of an invoice already paid reopens
-that invoice, and the next run pays the supplier again.
+`payment_run` needs **mock-sap 0.19.0 or later**. It writes which payment run
+has an invoice on the invoice itself, which an older mock-sap refuses, so
+nothing is paid. And against an older one, a customer's payment that quotes
+the number of an invoice already paid reopens that invoice.
 
 ## Running the tests
 
@@ -83,23 +84,27 @@ python3 -m pip install \
 
 ## Known to be wrong
 
-SAP has no state between open and cleared
-([mock-sap#90](https://github.com/rseufert/mock-sap/issues/90)), so an invoice a
-payment run has sent to the bank still looks open to the next run. `payment_run`
-keeps its own record instead: a `Register` of what it has sent, written before
-the file goes out, which a later run reads and leaves those items alone until
-the bank refuses the payment or SAP clears it
-([#2](https://github.com/rseufert/mock-acme/issues/2)).
+Two payment runs that select at the same moment can both pay an invoice. A run
+says in SAP which run has each item before its file goes out, as `PaymentRunID`
+and `PaymentRunDate` on the invoice, and every other run leaves that item alone
+until the bank refuses the payment, SAP clears it, or the payment comes back
+([#2](https://github.com/rseufert/mock-acme/issues/2),
+[#21](https://github.com/rseufert/mock-acme/issues/21)). But reading the open
+items and writing the claim are two requests, and nothing makes them one: two
+runs that both read before either writes both pay. One run after another, on
+any machine, is safe; two at once are not.
 
-That is one company's own record and not SAP's, and it has edges:
+It has other edges:
 
-- `PaymentRun(...)` with no `register` keeps it in memory, which covers that
-  object's runs and nothing else. A payment program that is started again each
-  day has to pass `register=Register(path)`.
-- Two installations with two registers pay twice, and so do two processes
-  writing one file at the same moment. Nothing here locks it.
-- Whoever posts the statements needs the same register, or its entries are
-  never let go.
+- A run's identification is one to six characters, which is SAP's own limit.
+  A longer one is refused before anything is selected.
+- When the bank refuses a payment and SAP cannot then be reached, the claim
+  stays on the item and no run selects it. The run says so as a problem, and a
+  person has to take the claim off.
+- `Register`, the run's own record from before SAP could hold this, is still
+  accepted and no longer needed. Passing one means two records of one fact:
+  whoever posts the statements has to be given the same register, or its entry
+  outlives the claim and holds an item SAP says is free.
 
 Money arriving is posted to SAP and nothing comes of it. Each credit on the
 statement says whether it is a payment coming back or money arriving, so SAP
