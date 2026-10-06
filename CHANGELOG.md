@@ -8,19 +8,27 @@ says so where it does.
 
 ## [Unreleased]
 
-**`payment_run` now needs mock-sap 0.19.0 or later**, and a second payment
-run no longer pays an invoice again whoever starts it: the run says in SAP
-which run has each item. Against an older mock-sap the run pays nothing,
-because SAP refuses the field it writes that in.
+Nothing yet.
 
-**Three behaviours change for a caller.** A run's identification must be one
-to six characters. A `PaymentRun` given no `register` has none, where it kept
-one in memory. And a second run is held back with no register at all.
+## [0.3.0] - 2026-10-05
+
+The payment run now leans on mock-sap 0.19.0 for two things it used to work
+around. A run says in SAP which run has each invoice before its file goes, so
+a second run does not pay it again whoever starts it; and money arriving is
+posted with the reference it quotes, because SAP can now tell a receipt from a
+return.
+
+**`payment_run` needs mock-sap 0.19.0 or later.** Against an older one a run
+pays nothing: SAP refuses the field the claim is written in, and each item is
+skipped with that as its reason.
+
+**Four behaviours change for a caller**, under Changed: read them before
+upgrading from 0.2.0.
 
 ### Added
 
-- **A run claims each item in SAP before it sends the file** (#21). It writes
-  its identification and date on the invoice, as `PaymentRunID` and
+- **A run claims each item in SAP before it sends the file** ([#21]). It
+  writes its identification and date on the invoice, as `PaymentRunID` and
   `PaymentRunDate`, which mock-sap carries to the open item from 0.19.0
   (rseufert/mock-sap#90). A run that finds another run's claim skips the item
   and names that run. SAP takes the claim off when a statement clears the item
@@ -31,25 +39,24 @@ one in memory. And a second run is held back with no register at all.
 
 ### Changed
 
-- **A run's identification is one to six characters**, SAP's limit for it.
-  Anything else is refused before an open item is selected. It was any string
-  outside NACHA mode.
-- **`Register` is optional and no longer needed.** `PaymentRun(...)` and
-  `ProcureToPay(...)` without one keep no record of their own, where they kept
-  one in memory. A caller that passes one gets what it did before, beside the
-  claim: asked after SAP, and let go of by this code. Its docstring says what
-  a second record costs.
+- **A run's identification is one to six characters**, SAP's limit for it
+  ([#21]). Anything else is refused before an open item is selected. It was
+  any string outside NACHA mode.
+- **`Register` is optional and no longer needed** ([#21]). `PaymentRun(...)`
+  and `ProcureToPay(...)` without one keep no record of their own, where they
+  kept one in memory. A caller that passes one gets what it did before, beside
+  the claim: asked after SAP, and let go of by this code. Its docstring says
+  what a second record costs.
 - The reason on an item another run holds reads `in payment: SAP has it with
   payment run R1 of 2026-10-05, ...`. It named the file's `MsgId`.
-
-- **Money arriving is posted to SAP with the reference it quotes** (#18). It
-  was left off, so that a mock-sap that could not tell a receipt from a return
-  did not reopen an invoice on it. Since 0.2.0 each credit says which it is,
-  and mock-sap reads that from 0.19.0, so the reference is back: it is what
-  SAP will clear a receivable by (rseufert/mock-sap#65).
-- **A run no longer reports money arriving as a problem.** The problem said a
-  reference had been withheld, and none is. What SAP made of the line is on the
-  statement's record, under `unprocessed`, in SAP's own words.
+- **A run no longer reports money arriving as a problem** ([#18]). The problem
+  said a reference had been withheld, and none is. What SAP made of the line
+  is on the statement's record, under `unprocessed`, in SAP's own words.
+- **Money arriving is posted to SAP with the reference it quotes** ([#18]).
+  It was left off, so that a mock-sap that could not tell a receipt from a
+  return did not reopen an invoice on it. Since 0.2.0 each credit says which
+  it is, and mock-sap reads that from 0.19.0, so the reference is back: it is
+  what SAP will clear a receivable by (rseufert/mock-sap#65).
 - The test extra requires `mock-sap>=0.19.0`, from 0.17.0.
 
 ## [0.2.0] - 2026-10-05
@@ -179,6 +186,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.3.0]: https://github.com/rseufert/mock-acme/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rseufert/mock-acme/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rseufert/mock-acme/releases/tag/v0.1.0
 [#1]: https://github.com/rseufert/mock-acme/pull/1
@@ -191,3 +199,4 @@ These differ from the last copies the mocks carried.
 [#13]: https://github.com/rseufert/mock-acme/issues/13
 [#15]: https://github.com/rseufert/mock-acme/issues/15
 [#18]: https://github.com/rseufert/mock-acme/issues/18
+[#21]: https://github.com/rseufert/mock-acme/issues/21
