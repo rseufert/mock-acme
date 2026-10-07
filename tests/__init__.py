@@ -63,6 +63,9 @@ def _free_port():
         return sock.getsockname()[1]
 
 
+free_port = _free_port
+
+
 def _healthy(url):
     try:
         with urllib.request.urlopen(url + "/_mock/health", timeout=2) as response:
@@ -96,14 +99,17 @@ def _stop():
     del _started[:]
 
 
-def another(module, arguments):
+def another(module, arguments, port=None):
     """One more mock, started differently from the shared one. Returns its URL.
 
     For a test that needs a mock configured at start-up - mock-edi with
     `--tax-rate`, say - which a running mock cannot be told afterwards. It is
     stopped with the rest when the interpreter exits.
+
+    `port` is for two mocks that have to be told of each other when they
+    start: take two from `free_port`, and start each naming the other's.
     """
-    port = _free_port()
+    port = port or _free_port()
     process = subprocess.Popen(
         [sys.executable, "-m", module, "--port", str(port), "-q"] + list(arguments),
         stdout=subprocess.DEVNULL)

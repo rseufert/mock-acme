@@ -87,5 +87,12 @@ def entries(statement) -> List[Dict[str, str]]:
             # return a payment and give no code, and money arriving from a
             # customer has no `RtrInf` whatever it quotes.
             "returned": any(tag(e) == "RtrInf" for e in entry.iter()),
+            # What the payer said the money is for, which on money arriving is
+            # the only place an invoice of ours is named: the structured
+            # creditor reference, and the note to payee as it was written.
+            "reference": next((child_text(e, "CdtrRefInf", "Ref") for e in entry.iter()
+                               if tag(e) == "Strd"), ""),
+            "note": " ".join((e.text or "").strip() for e in entry.iter()
+                             if tag(e) == "Ustrd").strip(),
         })
     return found

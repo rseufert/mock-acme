@@ -930,7 +930,7 @@ class PaymentRun:
         opening, closing = statement["opening"], statement["closing"]
         lines = statement["lines"]
         moved = sum((signed(e["amount"], e["side"]) for e in lines), Decimal("0"))
-        record = {"number": number, "date": day,
+        record = {"number": number, "date": day, "lines": lines,
                   "adds_up": opening + moved == closing,
                   "finsta": self.finsta(number, day, opening, closing, lines,
                                         statement["currency"])}
@@ -1078,10 +1078,11 @@ class PaymentRun:
         declaration that keeps SAP from reopening the invoice it quotes. So
         this needs mock-sap 0.19.0 or later: up to 0.18.0 the field is ignored
         and any credit quoting a cleared invoice reopens it, which is why the
-        reference was left off these lines until 0.19.0 was out (#2). mock-sap
-        answers such a line under `UNPROCESSED` and says why, and that is on
-        the statement's record; posting money in is mock-sap#65, which needs
-        this reference to clear a receivable by.
+        reference was left off these lines until 0.19.0 was out (#2). From
+        mock-sap 0.21.0 a receipt clears the receivable it quotes
+        (mock-sap#65), and one it cannot place is answered under `UNPROCESSED`
+        with the reason. What a receipt quotes is the payer's to say, and
+        `quoted_by` is where it is read from (#42).
 
         The currency is the statement's own, on every amount and on the
         account. It was `EUR` whatever the account held, and a dollar statement
@@ -1098,9 +1099,16 @@ class PaymentRun:
 
         body = []
         for position, line in enumerate(lines, 1):
+            quoted, note = quoted_by(line)
             reference = (
                 "<E1EDP02 SEGMENT=\"1\"><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDP02>"
-                % escape(line["end_to_end_id"]))
+                % escape(quoted))
+            if note:
+                # The note to payee, in lines of 70 as a bank wraps it. SAP
+                # searches it only on a line that states no reference.
+                reference += "<E1IDT01 SEGMENT=\"1\">%s</E1IDT01>" % "".join(
+                    "<TXT%02d>%s</TXT%02d>" % (n, escape(note[at:at + 70]), n)
+                    for n, at in enumerate(range(0, min(len(note), 14 * 70), 70), 1))
             # Not on a debit. From mock-sap 0.21.0 SAP reads it there too
             # (mock-sap#181): a debit carrying `RET` is money this company
             # received going back, and clears no payable. A payment of ours
@@ -1291,11 +1299,17 @@ def bai2_statements(text: str) -> List[Dict]:
                 raise ValueError("type code %s is neither a credit nor a debit" % fields[1])
             after = 3 + funds_width(fields[3:])
             refs = fields[after:after + 2] + ["", ""]
+            arrived = kind < 400 and fields[1] != BAI2_RETURNED
             current["lines"].append({
                 "amount": str(cents(fields[2])),
                 "side": "CRDT" if kind < 400 else "DBIT",
                 "booked_on": day, "end_to_end_id": refs[0], "msg_id": refs[1],
-                "returned_for": "", "returned": fields[1] == BAI2_RETURNED})
+                "returned_for": "", "returned": fields[1] == BAI2_RETURNED,
+                # On money arriving the customer reference is the payer's
+                # structured reference (mock-bank's reading of a `16`); on a
+                # payment of ours it is our own MsgId. The text is the payer's
+                # name and not a note to payee, so none is read.
+                "reference": refs[1] if arrived else "", "note": ""})
         elif code == "49" and current is not None:
             out.append(current)
             current = None
@@ -1369,6 +1383,33 @@ def unanswered(side: str, consequence: str, error) -> str:
     """A host that did not answer at all, named, and what that left undone."""
     return "%s did not answer, so %s: %s" % (side, consequence,
                                               getattr(error, "reason", error))
+
+
+# What ISO 20022 has a payer write in `EndToEndId` when it has none to give.
+NOT_PROVIDED = "NOTPROVIDED"
+
+
+def quoted_by(line: Dict) -> Tuple[str, str]:
+    """What a statement line says it pays: (the reference, the note to payee).
+
+    A payment of ours, going out or coming back, is known by the `EndToEndId`
+    this package wrote on it, and has no note worth reading.
+
+    **Money arriving is the payer's to describe**, and the payer says what it
+    pays in the remittance information: a structured reference, or prose. The
+    `EndToEndId` is the payer's own number for its own payment. So a receipt
+    is known by its structured reference where it has one; by its note alone
+    where it has a note and no structured reference, so that SAP searches the
+    note; and by its `EndToEndId` only where the payer wrote no remittance
+    information at all, which is where some payers put the invoice number.
+    """
+    if line["side"] != "CRDT" or line.get("returned"):
+        return line["end_to_end_id"], ""
+    reference, note = line.get("reference") or "", line.get("note") or ""
+    if reference or note:
+        return reference, note
+    given = line["end_to_end_id"]
+    return ("" if given == NOT_PROVIDED else given), ""
 
 
 def signed(amount: str, side: str) -> Decimal:

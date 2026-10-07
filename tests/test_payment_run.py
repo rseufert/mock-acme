@@ -513,7 +513,15 @@ class MoneyArriving(StatementCase):
         # that kept the invoice paid (#18): SAP's own answer is that the line
         # is money arriving, which it does not post yet (mock-sap#65).
         self.assertIn("<LINACTION>RCV</LINACTION>", carrying[0]["finsta"])
-        self.assertEqual(carrying[0]["finsta"].count("<BELNR>GLX-4711</BELNR>"), 1)
+        # The payer wrote it as a note to payee, so that is how SAP is given
+        # it (#42): on the line's note, and with no reference stated, which is
+        # the only line SAP searches the note of.
+        # A BAI2 statement carries no note to payee, so there the payer's
+        # `EndToEndId` is all that names it, and it goes as the reference.
+        self.assertIn("<BELNR>GLX-4711</BELNR>" if NACHA else
+                      "<BELNR></BELNR></E1EDP02><E1IDT01 SEGMENT=\"1\">"
+                      "<TXT01>GLX-4711</TXT01></E1IDT01>", carrying[0]["finsta"])
+        self.assertEqual(carrying[0]["finsta"].count("GLX-4711"), 1)
         self.assertEqual(len(carrying[0]["unprocessed"]), 1, carrying[0])
         self.assertIn("money arriving", carrying[0]["unprocessed"][0]["REASON"])
         # Nothing was held back, so the run has no problem to report for it.
@@ -585,6 +593,55 @@ class WhatACreditSaysItIs(unittest.TestCase):
             self.assertTrue(re.match(r"<LINLINEIT>\d{6}</LINLINEIT><LINACTION>", line), line)
 
 
+class WhatAStatementLineQuotes(unittest.TestCase):
+    """#42: where on a line the document it pays is looked for. No mock runs."""
+
+    def line(self, side="CRDT", returned=False, **said):
+        return dict({"side": side, "returned": returned, "end_to_end_id": "E2E",
+                     "reference": "", "note": "", "amount": "5.00"}, **said)
+
+    def test_a_payment_of_ours_is_known_by_the_end_to_end_id_we_wrote(self):
+        quoted = payment_run_module.quoted_by
+        self.assertEqual(quoted(self.line("DBIT", reference="REF", note="a note")),
+                         ("E2E", ""))
+        # Coming back, it is still ours, whatever the bank wrote beside it.
+        self.assertEqual(quoted(self.line(returned=True, reference="REF", note="a note")),
+                         ("E2E", ""))
+        # A line from a reader that knows nothing of remittance information.
+        self.assertEqual(quoted({"side": "CRDT", "end_to_end_id": "E2E"}), ("E2E", ""))
+
+    def test_money_arriving_is_known_by_what_the_payer_said_it_pays(self):
+        quoted = payment_run_module.quoted_by
+        self.assertEqual(quoted(self.line(reference="REF", note="a note")),
+                         ("REF", "a note"))
+        self.assertEqual(quoted(self.line(note="a note")), ("", "a note"))
+        self.assertEqual(quoted(self.line()), ("E2E", ""))
+        self.assertEqual(quoted(self.line(end_to_end_id="NOTPROVIDED")), ("", ""))
+
+    def test_a_long_note_is_written_in_lines_of_seventy(self):
+        note = "".join("%d" % (n % 10) for n in range(150)) + " <&>"
+        finsta = PaymentRun(SAP, BANK, ACME, MODE).finsta(
+            "7", "2026-10-08", Decimal("100.00"), Decimal("105.00"),
+            [self.line(note=note)], CURRENCY)
+        self.assertIn("<BELNR></BELNR></E1EDP02><E1IDT01 SEGMENT=\"1\"><TXT01>%s</TXT01>"
+                      "<TXT02>%s</TXT02><TXT03>%s &lt;&amp;&gt;</TXT03></E1IDT01>"
+                      % (note[:70], note[70:140], note[140:150]), finsta)
+
+    def test_a_statement_entrys_remittance_information_is_read(self):
+        from mockacme.bank_messages import entries
+        from xml.etree import ElementTree as ET
+        [entry] = entries(ET.fromstring(
+            "<Stmt><Ntry><Amt>5.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><NtryDtls><TxDtls>"
+            "<Refs><EndToEndId>E2E</EndToEndId></Refs><RmtInf><Ustrd>first</Ustrd>"
+            "<Ustrd>second</Ustrd><Strd><CdtrRefInf><Ref>REF</Ref></CdtrRefInf></Strd>"
+            "</RmtInf></TxDtls></NtryDtls></Ntry></Stmt>"))
+        self.assertEqual((entry["reference"], entry["note"], entry["end_to_end_id"]),
+                         ("REF", "first second", "E2E"))
+        [bare] = entries(ET.fromstring(
+            "<Stmt><Ntry><Amt>5.00</Amt><CdtDbtInd>DBIT</CdtDbtInd></Ntry></Stmt>"))
+        self.assertEqual((bare["reference"], bare["note"]), ("", ""))
+
+
 class TheStatementsCurrency(StatementCase):
     """#2: the FINSTA01 says the currency the statement is in, not `EUR`."""
 
@@ -642,6 +699,10 @@ class ReadingABai2Statement(unittest.TestCase):
         self.assertEqual([(l["end_to_end_id"], l["side"], l["returned"]) for l in lines],
                          [("BACK-1", "CRDT", True), ("IN-1", "CRDT", False),
                           ("OUT-1", "DBIT", False)])
+        # The customer reference is what the payer quoted only on money
+        # arriving (#42); on a payment of ours it is our own MsgId.
+        self.assertEqual([(l["reference"], l["note"]) for l in lines],
+                         [("", ""), ("MSG-1", ""), ("", "")])
 
 
     def test_a_movement_with_no_reference_is_read_with_an_empty_one(self):
