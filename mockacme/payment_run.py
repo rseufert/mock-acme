@@ -129,6 +129,9 @@ IDENTIFICATION = re.compile(r"[A-Z0-9]{1,3}")
 # character is ASCII too, and a line feed among them ends the record where it
 # stands, so `str.isascii()` is not the test.
 NACHA_PRINTABLE = re.compile(r"[ -~]*")
+# A routing number: nine of the digits 0 to 9. `str.isdigit()` is true of
+# other digits too, a superscript two among them, and those are not ASCII.
+ROUTING = re.compile(r"[0-9]{9}")
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 NACHA_AMOUNT_LIMIT = Decimal("100000000.00")
 
@@ -451,6 +454,12 @@ class PaymentRun:
         if unprintable(name):
             return ("company name %r is not printable ASCII, which a NACHA file "
                     "is%s" % (name, naming(name)))
+        routing = self.company.get("routing", "")
+        if not ROUTING.fullmatch(routing):
+            # It heads the file and its first eight digits are in every batch
+            # and trace number. A file with any other in that place is one the
+            # bank cannot answer by name, and its items would wait for ever.
+            return "company routing number %r is not nine digits" % routing
         return ""
 
     # -- 1. select -------------------------------------------------------------
@@ -543,10 +552,14 @@ class PaymentRun:
         item.name = bank.get("BankAccountHolderName") or item.supplier
         if self.nacha:
             item.routing, item.account = bank.get("BankNumber", ""), bank.get("BankAccount", "")
-            if not (len(item.routing) == 9 and item.routing.isdigit() and item.account):
+            if not (item.routing and item.account):
                 item.status, item.reason = "skipped", (
                     "no ABA routing and account number for account %s of %s"
                     % (invoice["BPBankAccountInternalID"], item.supplier))
+            elif not ROUTING.fullmatch(item.routing):
+                item.status, item.reason = "skipped", (
+                    "routing number %r of account %s of %s is not nine digits"
+                    % (item.routing, invoice["BPBankAccountInternalID"], item.supplier))
             elif len(item.account) > 17:
                 # Cut short, an account number is somebody else's account.
                 item.status, item.reason = "skipped", (
