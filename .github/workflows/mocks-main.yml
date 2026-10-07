@@ -41,7 +41,8 @@ jobs:
           python -m pip install \
             "mock-sap @ git+https://github.com/rseufert/mock-sap@main" \
             "mock-edi @ git+https://github.com/rseufert/mock-edi@main" \
-            "mock-bank @ git+https://github.com/rseufert/mock-bank@main"
+            "mock-bank @ git+https://github.com/rseufert/mock-bank@main" \
+            "mock-einvoice @ git+https://github.com/rseufert/mock-einvoice@main"
       # The commit each mock was built from is in this output, after the `@`.
       - name: Say which commits these are
         run: python -m pip freeze

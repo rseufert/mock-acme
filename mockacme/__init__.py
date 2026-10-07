@@ -11,9 +11,11 @@ from one system to the next:
     payment_run     SAP's open items, paid through the bank and cleared by its statement
     remittance      SAP's payment advice -> 820 -> supplier
     procure_to_pay  all of it, across all three mocks
+    e_invoice       the supplier's invoice as a UBL e-invoice, matched, posted, and
+                    answered with Peppol Invoice Responses down to paid
 
-It is not a mock. mock-sap, mock-edi and mock-bank stand in for systems you do
-not own so that code like this can be tested; this is that code. It talks to
+It is not a mock. mock-sap, mock-edi, mock-bank and mock-einvoice stand in for
+systems you do not own so that code like this can be tested; this is that code. It talks to
 them over HTTP and imports none of them.
 
 It is a reference, not a client library to put in front of real money:

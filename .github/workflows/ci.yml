@@ -42,7 +42,7 @@ jobs:
         run: python -m compileall -q mockacme tests
       # The released mocks, from PyPI: what a reader who follows the README
       # gets. `tests/__init__.py` starts them.
-      - name: Install the three mocks
+      - name: Install the mocks
         run: python -m pip install -e ".[test]"
       - name: Say which mocks these are
         run: python -m pip list
