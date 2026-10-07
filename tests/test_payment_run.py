@@ -707,6 +707,81 @@ class ASecondRunBeforeTheStatement(StatementCase):
             self.payments.run(self.monday, "R1")
         self.assertEqual(seen, [("R1", self.monday.isoformat())])
 
+    def unreadable(self):
+        """A run whose file the bank cannot read far enough to name."""
+        runner = self.another()
+        writer = "nacha_file" if NACHA else "payment_file"
+        return unittest.mock.patch.object(
+            runner, writer, return_value="101 short\n" if NACHA else "<not xml"), runner
+
+    def test_a_file_refused_with_nothing_naming_the_run_is_refused_and_let_go(self):
+        """#30: it was left `sent` and claimed, for a payment that did not exist."""
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.sap.invoice(UMBRELLA, "UMB-0815", "238.00")
+        self.advance(self.monday)
+        before = control(BANK, "GET", "/_mock/accounts/ACME")["balance"]
+        patched, runner = self.unreadable()
+        with patched:
+            run = runner.run(self.monday, "R1")
+        self.assertEqual(run.http_status, 422)
+        self.assertEqual({i.reference: (i.status, i.reason) for i in run.items},
+                         {"GLX-4711": ("rejected", "FF01"), "UMB-0815": ("rejected", "FF01")})
+        self.assertEqual(len(run.problems), 1, run.problems)
+        self.assertIn("refused the payment file with FF01", run.problems[0])
+        self.assertIn("none of its 2 payments was made", run.problems[0])
+        self.assertFalse(run.duplicate)
+        # The bank's own words for what was wrong are in the problem.
+        self.assertIn(run.refused[1], run.problems[0])
+        self.assertTrue(run.refused[1])
+        self.assertEqual(self.claim("GLX-4711"), ("", ""))
+        self.assertEqual(self.claim("UMB-0815"), ("", ""))
+        self.assertEqual(self.spent(before), 0)
+        # So the next run pays them, once.
+        again = self.another().run(self.monday, "R2")
+        self.assertEqual({i.reference: i.status for i in again.items},
+                         {"GLX-4711": "accepted", "UMB-0815": "accepted"})
+
+    def test_a_copy_refused_before_its_report_arrives_is_still_a_copy(self):
+        """The answer to the file says `DUPL` too. Read as a refusal, it would
+        take the claim off an invoice the first file paid."""
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        self.payments.run(self.monday, "R1")
+
+        def no_reports(base, method, path, body=None, content_type=""):
+            if path.startswith("/_mock/mailbox"):
+                return 200, b""
+            return call(base, method, path, body, content_type)
+
+        with unittest.mock.patch.object(payment_run_module, "call", no_reports):
+            copy = self.another().run(self.monday, "R1")
+        self.assertEqual(copy.http_status, 422)
+        self.assertTrue(copy.duplicate)
+        self.assertEqual([(i.status, i.reason) for i in copy.items], [("sent", "")])
+        self.assertEqual(copy.problems, [])
+        self.assertEqual(self.claim("GLX-4711"), ("R1", self.monday.isoformat()))
+
+    def test_a_refusal_that_cannot_be_read_leaves_the_items_held_and_says_so(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        for body in (b"Unprocessable", b"[]", b'{"status": "RJCT"}',
+                     b'{"status": "RJCT", "reason": 5}',
+                     b'{"status": "ACCP", "reason": "FF01"}', b"\xff"):
+            with self.subTest(body=body):
+                def answering(base, method, path, sent=None, content_type=""):
+                    if path == "/payments":
+                        return 422, body
+                    if path.startswith("/_mock/mailbox"):
+                        return 200, b""
+                    return call(base, method, path, sent, content_type)
+
+                with unittest.mock.patch.object(payment_run_module, "call", answering):
+                    run = self.another().run(self.monday, "R1")
+                self.assertEqual([i.status for i in run.items], ["sent"])
+                self.assertEqual(len(run.problems), 1, run.problems)
+                self.assertIn("what it said could not be read", run.problems[0])
+                self.assertEqual(self.claim("GLX-4711"), ("R1", self.monday.isoformat()))
+
     def test_a_claim_somebody_else_wrote_is_left_alone_too(self):
         """Not only this code's runs: any payment program that says so in SAP."""
         posted = self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")

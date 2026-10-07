@@ -8,7 +8,19 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A payment file the bank refuses whole is a refusal, whether or not the
+  bank's report names the run** ([#30]). The bank writes its report to the
+  file it read, and a file it could not read far enough has no name the run
+  knows. No report was matched, so every item stayed `sent` and claimed in
+  SAP with no problem reported: held for a payment that did not exist, and
+  skipped by every later run. The refusal is in the bank's answer to the file
+  as well, and the run now reads it there: the items are `rejected` with the
+  bank's reason code, their claims in SAP come off, and the run reports a
+  problem carrying what the bank said. A copy of a file the bank already has
+  (`DUPL`) is still a copy, read from the same answer, and its items stay as
+  the first file left them. `Run.refused` holds the code and the words.
 
 ## [0.3.1] - 2026-10-06
 
@@ -234,3 +246,4 @@ These differ from the last copies the mocks carried.
 [#21]: https://github.com/rseufert/mock-acme/issues/21
 [#25]: https://github.com/rseufert/mock-acme/issues/25
 [#27]: https://github.com/rseufert/mock-acme/issues/27
+[#30]: https://github.com/rseufert/mock-acme/issues/30

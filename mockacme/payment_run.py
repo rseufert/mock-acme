@@ -297,6 +297,9 @@ class Run:
     items: List[Item] = field(default_factory=list)
     http_status: Optional[int] = None
     duplicate: bool = False     # the bank already had this run's file
+    # What the bank said to the file itself when it refused it whole: the
+    # reason code and the words with it, or two empty strings.
+    refused: Tuple[str, str] = ("", "")
     # One per camt.053 posted to SAP: its number, day, whether it adds up,
     # what SAP cleared and could not place, and the FINSTA01 that was sent.
     statements: List[Dict] = field(default_factory=list)
@@ -602,6 +605,8 @@ class PaymentRun:
             # other answer means the file may not have arrived at all.
             run.problems.append("the bank answered %d to the payment file: %s"
                                 % (run.http_status, body.decode("utf-8", "replace")[:200]))
+        if run.http_status == 422:
+            run.refused = refusal_said(body)
         for item in paying:
             item.status = "sent"
 
@@ -739,6 +744,8 @@ class PaymentRun:
             self.read_acknowledgement(run)
         else:
             self.read_status_reports(run)
+        if run.http_status == 422 and not run.duplicate:
+            self.refused_without_a_report(run)
         # A payment the bank refused moved no money, so the item is owed and
         # free for the next run. SAP cannot see a refusal, so the run takes its
         # own claim off. Everything else stays held.
@@ -747,6 +754,38 @@ class PaymentRun:
                 self.let_go(run, item)
                 if self.register:
                     self.register.release(item.document)
+
+    def refused_without_a_report(self, run: Run) -> None:
+        """A file the bank refused whole, when nothing it sent names the run (#30).
+
+        The bank writes its report to the file it read, and a file it could
+        not read far enough has no name the run would know, so no report is
+        matched and every item would stay `sent`: claimed in SAP for a payment
+        that does not exist. The refusal is in the answer to the file as well,
+        and that is what is read here. A refusal of the whole file books
+        nothing, so its items are refused and their claims come off.
+
+        `DUPL` is the exception, here as in a report: the bank has this run
+        already, and what it said about the first file stands.
+        """
+        code, text = run.refused
+        if code == "DUPL":
+            run.duplicate = True
+            return
+        waiting = [i for i in run.paying() if i.status == "sent"]
+        if not waiting:
+            return
+        if not code:
+            run.problems.append(
+                "the bank refused the payment file and what it said could not be "
+                "read, so its %d payments are still held as sent" % len(waiting))
+            return
+        for item in waiting:
+            item.status, item.reason = "rejected", code
+        run.problems.append(
+            "the bank refused the payment file with %s and sent nothing that names "
+            "run %s, so none of its %d payments was made: %s"
+            % (code, run.msg_id, len(waiting), text))
 
     def read_status_reports(self, run: Run) -> None:
         status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&type=pain.002")
@@ -1263,6 +1302,21 @@ def nacha_time_and_modifier(identification: str) -> Tuple[str, str]:
               + int(identification, 36))
     minutes, modifier = divmod(number, 36)
     return "%02d%02d" % divmod(minutes, 60), ALPHABET[modifier]
+
+
+def refusal_said(body: bytes) -> Tuple[str, str]:
+    """The reason code and words in the bank's answer to a file it refused
+    whole, or two empty strings if the answer does not say."""
+    try:
+        answer = json.loads(body.decode("utf-8"))
+    except ValueError:
+        return "", ""
+    if not isinstance(answer, dict) or answer.get("status") != "RJCT":
+        return "", ""
+    code, text = answer.get("reason"), answer.get("reason_text")
+    if not isinstance(code, str) or not code:
+        return "", ""
+    return code, text if isinstance(text, str) else ""
 
 
 def said(status: int, body: bytes) -> str:
