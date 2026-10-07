@@ -1,18 +1,18 @@
-"""The tests, and the three mocks they run against.
+"""The tests, and the four mocks they run against.
 
-    pip install mock-sap mock-edi mock-bank
+    pip install mock-sap mock-edi mock-bank mock-einvoice
     python3 -m unittest discover -s tests -t . -v
 
-Importing this package starts mock-sap, mock-edi and mock-bank, each on a port
-the operating system chose, and stops them when the interpreter exits. So the
-command above is the whole arrangement: nothing to start first, and no port to
-keep free. In the mocks' own repositories the same tests needed three servers
-started by hand on 8000, 8080 and 8090, and mock-edi and mock-bank both default
-to 8080.
+Importing this package starts mock-sap, mock-edi, mock-bank and mock-einvoice,
+each on a port the operating system chose, and stops them when the interpreter
+exits. So the command above is the whole arrangement: nothing to start first,
+and no port to keep free. In the mocks' own repositories the same tests needed
+three servers started by hand on 8000, 8080 and 8090, and mock-edi and
+mock-bank both default to 8080.
 
-`SAP_URL`, `EDI_URL` and `BANK_URL` point the tests at mocks that are already
-running. A mock whose URL is set is not started, which is how a test is run
-against a mock's `main` rather than its release:
+`SAP_URL`, `EDI_URL`, `BANK_URL` and `EINVOICE_URL` point the tests at mocks
+that are already running. A mock whose URL is set is not started, which is how
+a test is run against a mock's `main` rather than its release:
 
     python3 -m mocksap --port 8000 &          # from a mock-sap checkout
     SAP_URL=http://127.0.0.1:8000 python3 -m unittest discover -s tests -t .
@@ -22,7 +22,7 @@ and a reset returns it there. `test_payment_run` needs exactly that moment for
 one test, and every other test moves the bank's clock itself. A bank started
 by hand needs `--clock 2026-10-02T16:00`.
 
-The test modules read the three URLs when they are imported, which is after
+The test modules read the URLs when they are imported, which is after
 this file has run, so setting `os.environ` here is enough.
 """
 import atexit
@@ -41,6 +41,7 @@ MOCKS = (
     ("SAP_URL", "mocksap", ["-q"]),
     ("EDI_URL", "mockedi", ["-q"]),
     ("BANK_URL", "mockbank", ["-q", "--clock", BANK_CLOCK]),
+    ("EINVOICE_URL", "mockeinvoice", ["-q"]),
 )
 
 # Long, because of mock-sap alone. `HTTPServer.server_bind` reverse-resolves the
@@ -76,7 +77,7 @@ def _wait(module, process, url):
         if process.poll() is not None:
             raise RuntimeError(
                 "%s exited with %s before it answered. Is it installed? "
-                "(pip install mock-sap mock-edi mock-bank)" % (module, process.returncode))
+                "(pip install mock-sap mock-edi mock-bank mock-einvoice)" % (module, process.returncode))
         if _healthy(url):
             return
         time.sleep(0.1)

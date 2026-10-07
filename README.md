@@ -1,8 +1,9 @@
 # mock-acme
 
 **The integration between the mocks.** [mock-sap](https://github.com/rseufert/mock-sap),
-[mock-edi](https://github.com/rseufert/mock-edi) and
-[mock-bank](https://github.com/rseufert/mock-bank) stand in for systems you do
+[mock-edi](https://github.com/rseufert/mock-edi),
+[mock-bank](https://github.com/rseufert/mock-bank) and
+[mock-einvoice](https://github.com/rseufert/mock-einvoice) stand in for systems you do
 not own, so that the code between them can be tested. This is that code: ACME's
 middleware, the fourth actor in every story the mocks tell.
 
@@ -20,6 +21,7 @@ released mocks, kept in one place so that there is one copy of each.
 | `mockacme.payment_run` | SAP's open items, paid as a pain.001 or a NACHA file, cleared by posting the statement as a FINSTA01 | SAP, bank |
 | `mockacme.remittance` | SAP's payment advice (a PEXR2002 it generates) out as an 820, and what the supplier made of it | SAP, supplier |
 | `mockacme.procure_to_pay` | one purchase from the order to the cleared payment, and the supplier told what it was for | all three |
+| `mockacme.e_invoice` | the supplier's invoice as a UBL e-invoice, matched and posted as an 810 is, and answered with Peppol Invoice Responses: received, accepted or rejected with the reason, and paid when SAP has cleared it | SAP, supplier (e-invoicing and EDI) |
 
 `mockacme.bank_messages` is what the two payment modules share: the call to the
 bank and the reading of its ISO 20022 answers.
@@ -34,7 +36,7 @@ python3 -m pip install mock-acme
 ```
 
 That installs the package and nothing else. The mocks it talks to are separate:
-`pip install mock-sap mock-edi mock-bank`.
+`pip install mock-sap mock-edi mock-bank mock-einvoice`.
 
 `payment_run` needs **mock-sap 0.19.0 or later**. It writes which payment run
 has an invoice on the invoice itself, which an older mock-sap refuses, so
@@ -50,7 +52,7 @@ python3 -m pip install -e ".[test]"
 python3 -m unittest discover -s tests -t . -v
 ```
 
-That is the whole arrangement. Importing `tests` starts the three mocks, each on
+That is the whole arrangement. Importing `tests` starts the four mocks, each on
 a port the operating system chose, and stops them afterwards.
 [`tests/__init__.py`](tests/__init__.py) says how to point the tests at a mock
 that is already running, which is how they are run against a mock's `main`.
@@ -79,7 +81,8 @@ by hand:
 python3 -m pip install \
   "mock-sap @ git+https://github.com/rseufert/mock-sap@main" \
   "mock-edi @ git+https://github.com/rseufert/mock-edi@main" \
-  "mock-bank @ git+https://github.com/rseufert/mock-bank@main"
+  "mock-bank @ git+https://github.com/rseufert/mock-bank@main" \
+  "mock-einvoice @ git+https://github.com/rseufert/mock-einvoice@main"
 ```
 
 ## Known to be wrong
@@ -94,7 +97,24 @@ items and writing the claim are two requests, and nothing makes them one: two
 runs that both read before either writes both pay. One run after another, on
 any machine, is safe; two at once are not.
 
+An e-invoice's answers are one process's memory. `e_invoice` remembers which
+invoices it has collected and what it has said of each, as `invoice_check`
+remembers what it posted. Started again, it collects everything the supplier
+has sent once more. SAP is asked and says it holds each one, so nothing is
+posted twice; but each is acknowledged again and then rejected as a duplicate.
+A supplier that keeps Peppol's order of statuses ignores both, since only
+"paid" may follow "accepted", and mock-einvoice does. One that does not would
+see an accepted invoice rejected. And "paid" is never said for an invoice
+posted before the restart, however it is cleared.
+
 It has other edges:
+
+- `e_invoice` does not read allowances or charges, so an e-invoice with one is
+  rejected because it does not add up. It does not read a credit note at all.
+  A part payment is not told as one: a payable is cleared or it is not.
+- Which of Peppol's reason codes an e-invoice is rejected with is this
+  package's reading: its list has no code for a duplicate, which is told as a
+  wrong reference (`REF`), nor for a currency, which is told as other (`OTH`).
 
 - A run's identification is one to six characters, which is SAP's own limit.
   A longer one is refused before anything is selected.

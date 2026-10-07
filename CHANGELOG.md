@@ -8,7 +8,21 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`e_invoice`: a supplier's UBL e-invoice, matched, posted and answered**
+  ([#34]). The invoice comes from mock-einvoice instead of as an 810; the
+  order and the ship notice still go by EDI, with a supplier who sends no
+  810. It is read into the dict `read_810` makes, so the three-way match, the
+  INVOIC IDoc and the duplicate question are `InvoiceCheck`'s own. The
+  supplier is then told with Peppol Invoice Responses: `AB` when the invoice
+  is collected, `AP` when SAP posts it, `RE` or `UQ` with a reason from
+  Peppol's list and the problem in words when it is blocked, and `PD` when
+  the payable is cleared in SAP, which is what the remittance advice rests on
+  too. A block that is not the supplier's doing is not told. An XRechnung
+  invoice is matched and posted and told nothing, because XRechnung has no
+  response message. The tests need **mock-einvoice 0.1.0**, a fourth mock,
+  which `tests/__init__.py` now starts with the others.
 
 ## [0.3.2] - 2026-10-06
 
@@ -256,3 +270,4 @@ These differ from the last copies the mocks carried.
 [#25]: https://github.com/rseufert/mock-acme/issues/25
 [#27]: https://github.com/rseufert/mock-acme/issues/27
 [#30]: https://github.com/rseufert/mock-acme/issues/30
+[#34]: https://github.com/rseufert/mock-acme/issues/34
