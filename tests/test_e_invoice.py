@@ -22,7 +22,7 @@ from xml.etree import ElementTree as ET
 
 from mockacme import e_invoice
 from mockacme.e_invoice import EInvoices, read_ubl, reason_for, response_xml
-from mockacme.invoice_check import InvoiceCheck, Sap
+from mockacme.invoice_check import InvoiceCheck, Sap, invoic_idoc
 
 from .test_procure_to_pay import EDI, GLOBEX, SAP, PurchaseCase, control
 
@@ -328,48 +328,6 @@ class TestWhatIsNotAccepted(EInvoiceCase):
 
 
 class TestTheSameEInvoiceTwice(EInvoiceCase):
-    def test_a_copy_that_arrives_after_a_restart_is_rejected_by_asking_sap(self):
-        po = self.purchase()
-        self.supplier_invoices("GLX-9001", po)
-        self.invoices.run()
-
-        # The middleware is started again and remembers nothing; the supplier
-        # sends the invoice again.
-        again = EInvoices(self.middleware().check, EINVOICE, now=lambda: NOON)
-        again.taken = {"1"}
-        self.supplier_invoices("GLX-9001", po)
-        [result] = again.run()
-
-        self.assertEqual((result["status"], result["problems"], result["said"]),
-                         ("blocked", ["supplier invoice GLX-9001 from %s is already in SAP"
-                                      % GLOBEX], ["AB", "RE"]))
-        self.assertEqual(len(self.open_items()), 1)
-        # The supplier's side finds an invoice by its number, and takes a
-        # response to be about the later of two.
-        self.assertEqual(self.at_the_supplier("1")[0], "AP")
-        self.assertEqual(self.at_the_supplier("2"), ("RE", [("AB", ""), ("RE", "")]))
-        self.assertEqual(self.response(4)[1][0][:2], ("REF", "OPStatusReason"))
-
-    def test_started_again_it_answers_what_it_answered_and_the_supplier_ignores_it(self):
-        """Known to be wrong, and in the README: what was collected and said
-        is one process's memory."""
-        po = self.purchase()
-        self.supplier_invoices("GLX-9001", po)
-        self.invoices.run()
-
-        again = EInvoices(self.middleware().check, EINVOICE, now=lambda: NOON)
-        [result] = again.run()
-
-        self.assertEqual((result["status"], result["said"]), ("blocked", ["AB", "RE"]))
-        self.assertEqual(len(self.open_items()), 1)
-        # Peppol's order is what saves the supplier's record: after accepted,
-        # only paid is heeded.
-        self.assertEqual(self.at_the_supplier(), ("AP", [
-            ("AB", ""), ("AP", ""), ("AB", "OP-BR111-R005"), ("RE", "OP-BR111-R005")]))
-        # And paid is then never said: to this process the invoice is rejected.
-        self.pay_what_is_due()
-        self.assertEqual((again.paid(), self.at_the_supplier()[0]), ([], "AP"))
-
     def test_a_copy_in_the_same_run_is_left_and_said_so(self):
         po = self.purchase()
         self.supplier_invoices("GLX-9001", po)
@@ -379,6 +337,171 @@ class TestTheSameEInvoiceTwice(EInvoiceCase):
                          ("left", ["invoice GLX-9001 was collected before; this copy was "
                                    "not checked"], "posted"))
         self.assertEqual(len(self.open_items()), 1)
+
+
+class TestStartedAgain(EInvoiceCase):
+    """The middleware is started again and remembers nothing. What it said is
+    asked of the supplier's side, and what it posted of SAP."""
+
+    def again(self):
+        return EInvoices(self.middleware().check, EINVOICE, now=lambda: NOON)
+
+    def response_id(self, number):
+        root = ET.fromstring(einvoice("GET", "/_mock/answers/%s" % number))
+        return root.findtext(e_invoice.CBC + "ID")
+
+    def test_an_accepted_invoice_is_not_answered_again_and_is_told_when_paid(self):
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po)
+        self.invoices.run()
+
+        again = self.again()
+        self.assertEqual((again.run(), again.paid()), ([], []))
+        self.assertEqual(self.at_the_supplier(), ("AP", [("AB", ""), ("AP", "")]))
+        self.assertEqual(len(self.open_items()), 1)
+
+        self.pay_what_is_due()
+        self.assertEqual(again.paid(), [
+            {"invoice": "GLX-9001", "status": "paid", "said": ["AB", "AP", "PD"]}])
+        self.assertEqual(self.at_the_supplier(),
+                         ("PD", [("AB", ""), ("AP", ""), ("PD", "")]))
+        # Numbered after the two an earlier process sent.
+        self.assertEqual([self.response_id(n) for n in (1, 2, 3)],
+                         ["GLX-9001-1", "GLX-9001-2", "GLX-9001-3"])
+        # And a third process says nothing of an invoice that is paid.
+        third = self.again()
+        self.assertEqual((third.run(), third.paid()), ([], []))
+        self.assertEqual(len(self.at_the_supplier()[1]), 3)
+
+    def test_a_rejected_or_queried_invoice_is_not_matched_again(self):
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po, [
+            (item, quantity, "99.00") for item, quantity, _price in self.order_lines(po)])
+        self.supplier_invoices("GLX-9002", "4599999999", [("00010", "1", "1.00")])
+        self.invoices.run()
+        heard = [self.at_the_supplier("1"), self.at_the_supplier("2")]
+        self.assertEqual([status for status, _responses in heard], ["RE", "UQ"])
+
+        again = self.again()
+        self.assertEqual((again.run(), again.paid()), ([], []))
+        self.assertEqual([self.at_the_supplier("1"), self.at_the_supplier("2")], heard)
+
+    def test_one_only_acknowledged_is_matched_and_not_acknowledged_twice(self):
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po)
+        self.invoices.collect()         # and the process stops there
+
+        [result] = self.again().run()
+        self.assertEqual((result["status"], result["said"]), ("posted", ["AB", "AP"]))
+        self.assertEqual(self.at_the_supplier(), ("AP", [("AB", ""), ("AP", "")]))
+
+    def test_one_posted_and_never_said_so_is_left_to_a_person(self):
+        """Known to be wrong, and in the README: SAP holding an invoice does
+        not say who posted it."""
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po)
+        self.invoices.collect()
+        # Posted, and the process stops before it says accepted.
+        check = self.invoices.check
+        check.pending.append((self.invoices.known["GLX-9001"]["invoice"], False))
+        self.assertEqual([r["status"] for r in check.run()], ["posted"])
+
+        again = self.again()
+        [result] = again.run()
+        self.assertEqual((result["status"], result["said"], result["problems"]), ("blocked", ["AB"], [
+            "supplier invoice GLX-9001 from %s is already in SAP" % GLOBEX,
+            "invoice GLX-9001 was acknowledged before this process started, which may be "
+            "what posted it; the supplier was told nothing"]))
+        self.assertEqual(self.at_the_supplier(), ("AB", [("AB", "")]))
+        # Not rejected, and not paid either: nothing here knows it is ours.
+        self.pay_what_is_due()
+        self.assertEqual((again.paid(), self.at_the_supplier()[0]), ([], "AB"))
+
+    def test_one_never_seen_that_sap_holds_is_still_rejected(self):
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po)
+        self.invoices.run()
+        control(EINVOICE, "POST", "/_mock/reset")       # the copy is all there is
+        self.supplier_invoices("GLX-9001", po)
+
+        [result] = self.again().run()
+        self.assertEqual((result["status"], result["said"], result["problems"]),
+                         ("blocked", ["AB", "RE"],
+                          ["supplier invoice GLX-9001 from %s is already in SAP" % GLOBEX]))
+        self.assertEqual(self.response(2)[1][0][:2], ("REF", "OPStatusReason"))
+        self.assertEqual(len(self.open_items()), 1)
+
+    def test_a_copy_that_arrives_after_it_is_left_as_one_in_the_same_run_is(self):
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po)
+        self.invoices.run()
+        self.supplier_invoices("GLX-9001", po)
+
+        [result] = self.again().run()
+        self.assertEqual((result["status"], result["problems"]), ("left", [
+            "invoice GLX-9001 was collected before; this copy was not checked"]))
+        self.assertEqual((self.at_the_supplier("1")[0], self.at_the_supplier("2")),
+                         ("AP", ("", [])))
+        self.assertEqual(len(self.open_items()), 1)
+
+    def test_what_the_supplier_ignored_was_not_said(self):
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po)
+        self.invoices.run()
+        # Something else tells the supplier under query after accepted, which
+        # the supplier ignores; so accepted is still the last thing said.
+        invoice = self.invoices.known["GLX-9001"]["invoice"]
+        einvoice("POST", "/responses", e_invoice.response_xml(
+            invoice, "X-1", "UQ", NOON, ("invoice GLX-9001 names no purchase order",)))
+        self.assertEqual(self.at_the_supplier()[1][-1], ("UQ", "OP-BR111-R005"))
+
+        again = self.again()
+        again.run()
+        self.assertEqual(again.known["GLX-9001"]["said"], ["AB", "AP"])
+        self.pay_what_is_due()
+        self.assertEqual(again.paid()[0]["said"], ["AB", "AP", "PD"])
+        self.assertEqual(self.response_id(4), "GLX-9001-4")
+
+    def test_an_accepted_invoice_sap_holds_twice_or_not_at_all_is_never_told_paid(self):
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po)
+        self.invoices.run()
+        invoice = self.invoices.known["GLX-9001"]["invoice"]
+        # A second supplier invoice with the same number, which SAP takes.
+        self.sap.request("POST", "/sap/bc/idoc", invoic_idoc(
+            invoice, self.sap.purchase_order(po)), "application/xml")
+        again = self.again()
+        again.run()
+        self.assertEqual(again.payable(again.known["GLX-9001"]), "")
+        self.pay_what_is_due()
+        self.assertEqual((again.paid(), self.at_the_supplier()[0]), ([], "AP"))
+
+        # And one the supplier was told is accepted that SAP has never had.
+        other = self.purchase()
+        self.supplier_invoices("GLX-9002", other)
+        unposted = EInvoices(self.middleware().check, EINVOICE, now=lambda: NOON)
+        unposted.collect()
+        unposted.say("GLX-9002", "AP")
+        again = self.again()
+        again.run()
+        self.assertEqual(again.payable(again.known["GLX-9002"]), "")
+        self.assertEqual(again.paid(), [])
+
+
+    def test_an_xrechnung_invoice_is_blocked_for_being_in_sap_each_time(self):
+        """Known to be wrong, and in the README: an XRechnung invoice is told
+        nothing, so the supplier's side has nothing to say of it."""
+        po = self.purchase()
+        self.supplier_invoices("GLX-9001", po, specification=XRECHNUNG)
+        self.invoices.run()
+        for _restart in range(2):
+            again = self.again()
+            [result] = again.run()
+            self.assertEqual((result["status"], result["said"], result["problems"]),
+                             ("blocked", [], ["supplier invoice GLX-9001 from %s is already "
+                                              "in SAP" % GLOBEX]))
+            self.assertEqual(again.run(), [])
+        self.assertEqual((self.at_the_supplier(), len(self.open_items())), (("", []), 1))
 
 
 class TestWhatIsNotTheSuppliersToHear(EInvoiceCase):
