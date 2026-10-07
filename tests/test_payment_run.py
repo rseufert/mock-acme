@@ -644,6 +644,21 @@ class ReadingABai2Statement(unittest.TestCase):
                           ("OUT-1", "DBIT", False)])
 
 
+    def test_a_movement_with_no_reference_is_read_with_an_empty_one(self):
+        """#44: BAI2 lets a `16` record stop after the funds type. It is not an
+        error, and nothing is made up for it: the line reaches SAP quoting
+        nothing."""
+        text = "\n".join(
+            ["01,MOCKBANK,ACME,261005,0000,1,80,1,2/",
+             "02,ACME,MOCKBANK,1,261005,0000,USD,2/",
+             "03,0000000001,USD,010,10000,,,015,9700,,/",
+             "16,447,300,0/",
+             "49,20000,3/", "98,20000,1,5/", "99,20000,1,7/"])
+        [line] = payment_run_module.bai2_statements(text)[0]["lines"]
+        self.assertEqual((line["end_to_end_id"], line["msg_id"], line["side"]),
+                         ("", "", "DBIT"))
+
+
 class ASecondRunBeforeTheStatement(StatementCase):
     """#2, #21: an item one run has sent to the bank is not paid again by the next.
 
@@ -937,6 +952,96 @@ class ASecondRunBeforeTheStatement(StatementCase):
             self.assertIn("is not one to 6 characters", run.problems[0])
             self.assertIn("no open item was selected", run.problems[0])
         self.assertEqual(self.claim("GLX-4711"), ("", ""))
+
+
+class TwoSuppliersOneNumberOneAmount(StatementCase):
+    """#44: where mock-sap's reading of a statement line turns on this run's claim.
+
+    An invoice number is a supplier's own sequence, so two suppliers can both
+    bill `INV-1`, and for the same money. The bank's line quotes `INV-1` and an
+    amount, both items fit, and nothing on the line says which supplier was
+    paid. **From mock-sap 0.21.0** (mock-sap#173) the item a payment run has
+    claimed is the one cleared, and the claim is the `PaymentRunID` this run
+    writes before its file goes. Up to 0.20.0 neither was cleared and the line
+    was answered under `UNPROCESSED`. So these assert mock-sap 0.21.0's answer,
+    and it is this repository's own write that decides it.
+
+    Against the mocks, with the bank's own statement: `TwoSuppliersWithOneInvoiceNumber`
+    below hands SAP's answer over, and so says nothing of what SAP answers.
+    """
+
+    def test_the_item_the_run_claimed_is_the_one_cleared(self):
+        self.sap.invoice(GLOBEX, "INV-1", "1190.00")
+        self.advance(self.monday)
+        run = self.payments.run(self.monday, "R1")
+        self.assertEqual([i.status for i in run.items], ["accepted"])
+        # Posted after the run, so no run has it: the same number and the same
+        # amount, from another supplier.
+        umbrella = self.sap.invoice(UMBRELLA, "INV-1", "1190.00")
+        self.advance(self.monday + datetime.timedelta(days=1))
+        self.payments.reconcile(run)
+        [monday] = [s for s in run.statements if s["date"] == self.monday.isoformat()]
+        self.assertEqual(monday["unprocessed"], [])
+        [item] = run.items
+        self.assertEqual(item.status, "cleared")
+        open_now = {row["AccountingDocument"] for row in odata(
+            SAP, ITEMS, **{"$filter": "AccountingDocumentItemType eq 'K' and "
+                                      "ClearingAccountingDocument eq ''"})}
+        self.assertNotIn(item.document.rsplit("/", 1)[-1], open_now)
+        self.assertIn(umbrella["ACCOUNTINGDOCUMENT"], open_now)
+        self.assertEqual(run.problems, [])
+
+    def test_with_no_claim_on_either_neither_is_cleared(self):
+        """The other half: without a claim SAP cannot tell, and does not pick."""
+        globex = self.sap.invoice(GLOBEX, "INV-1", "1190.00")
+        umbrella = self.sap.invoice(UMBRELLA, "INV-1", "1190.00")
+        record = self.payments.post_statement(Run(self.monday, "R1", []), {
+            "number": "900", "day": self.monday.isoformat(), "currency": CURRENCY,
+            "opening": Decimal("5000.00"), "closing": Decimal("3810.00"),
+            "lines": [{"end_to_end_id": "INV-1", "amount": Decimal("1190.00"),
+                       "side": "DBIT", "returned_for": "", "returned": False}]})
+        self.assertEqual(record["cleared"], [])
+        [refused] = record["unprocessed"]
+        for posted in (globex, umbrella):
+            self.assertIn(posted["ACCOUNTINGDOCUMENT"], refused["REASON"])
+
+
+class AStatementLineWithNoReference(StatementCase):
+    """#44: a debit that quotes nothing clears nothing, whatever it is for.
+
+    The reference on a FINSTA01 line is what the bank's statement gave back,
+    and a bank need not give one back: a BAI2 `16` record may stop after the
+    funds type. That line goes to SAP as an empty `BELNR`.
+
+    mock-sap does **not** then match on the amount (0.21.0, `reconcile._match`):
+    a line that names no reference is quoted by no item, and is answered under
+    `UNPROCESSED` as "no open item quotes this reference" - with one open item
+    of exactly that amount, and with this run's claim on it. #44 was raised
+    expecting the claim to decide here; it does not, and this holds that down.
+
+    So the payment is made and the item stays open and claimed. The run says
+    so only on the statement's record, which is thin: see the README.
+
+    The statement is written here, not fetched: mock-bank always gives the
+    reference back.
+    """
+
+    def test_the_only_item_of_that_amount_claimed_by_the_run_is_not_cleared(self):
+        self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
+        self.advance(self.monday)
+        run = self.payments.run(self.monday, "R1")
+        record = self.payments.post_statement(run, {
+            "number": "900", "day": self.monday.isoformat(), "currency": CURRENCY,
+            "opening": Decimal("5000.00"), "closing": Decimal("3810.00"),
+            "lines": [{"end_to_end_id": "", "amount": Decimal("1190.00"),
+                       "side": "DBIT", "returned_for": "", "returned": False}]})
+        self.assertIn("<BELNR></BELNR>", record["finsta"])
+        self.assertEqual(record["cleared"], [])
+        self.assertEqual([u["REASON"] for u in record["unprocessed"]],
+                         ["no open item quotes this reference"])
+        self.assertEqual([i.status for i in run.items], ["accepted"])
+        self.assertEqual(self.clearing("GLX-4711"), "")
+        self.assertEqual(self.cube_item("GLX-4711")["PaymentRunID"], "R1")
 
 
 class TheRunsOwnRegister(StatementCase):
