@@ -120,6 +120,12 @@ class Sap(SapSession):
                    json.dumps({"BankNumber": routing, "BankAccount": account}),
                    "application/json")
 
+    def holder(self, supplier, name):
+        """Name the holder of a supplier's account, which is who a payment is to."""
+        self.write("PATCH", ODATA + "/API_BUSINESS_PARTNER_SRV/A_BusinessPartnerBank"
+                   "(BusinessPartner='%s',BankIdentification='0001')" % supplier,
+                   json.dumps({"BankAccountHolderName": name}), "application/json")
+
     def block(self, posted, reason="A"):
         """Block a posted invoice for payment, on the invoice, as SAP users do."""
         self.write("PATCH", ODATA + "/API_SUPPLIERINVOICE_PROCESS_SRV/A_SupplierInvoice"
@@ -245,6 +251,42 @@ class PayingOpenItems(MocksCase):
         self.assertIn("17 characters", items["UMB-0815"].reason)
         status, _body = call(BANK, "GET", "/_mock/payments/UMB-0815")
         self.assertEqual(status, 404)
+
+    @unittest.skipUnless(NACHA, "what a NACHA record cannot hold")
+    def test_a_control_character_in_a_name_skips_the_item_and_the_rest_is_paid(self):
+        # ASCII, and not printable: a tab would sit in the record as it is, and
+        # a line feed would end the record in the middle of the name.
+        for character in ("\t", "\n", "\x7f"):
+            with self.subTest(character=character):
+                self.setUp()
+                self.sap.holder(UMBRELLA, "Umbrella%sCorp" % character)
+                self.sap.invoice(UMBRELLA, "UMB-0815", "238.00")
+                self.sap.invoice(GLOBEX, "GLX-4711", "5.00")
+                run = self.payments.run(self.today, "R1")
+                items = self.by_reference(run)
+                self.assertEqual({r: i.status for r, i in items.items()},
+                                 {"UMB-0815": "skipped", "GLX-4711": "accepted"},
+                                 [i.reason for i in run.items] + run.problems)
+                self.assertIn("printable ASCII", items["UMB-0815"].reason)
+                self.assertIn(repr(character), items["UMB-0815"].reason)
+                status, _body = call(BANK, "GET", "/_mock/payments/UMB-0815")
+                self.assertEqual(status, 404)
+
+    @unittest.skipUnless(NACHA, "what a NACHA record cannot hold")
+    def test_a_control_character_in_an_account_or_reference_skips_the_item(self):
+        self.sap.domestic_bank(UMBRELLA, "021000021", "12345\t678")
+        self.sap.invoice(UMBRELLA, "UMB-0815", "238.00")
+        self.sap.invoice(GLOBEX, "GLX&#127;4711", "10.00")     # DEL, as XML writes it
+        self.sap.invoice(GLOBEX, "GLX-4712", "5.00")
+        run = self.payments.run(self.today, "R1")
+        items = self.by_reference(run)
+        self.assertEqual({r: i.status for r, i in items.items()},
+                         {"UMB-0815": "skipped", "GLX\x7f4711": "skipped",
+                          "GLX-4712": "accepted"},
+                         [i.reason for i in run.items] + run.problems)
+        self.assertIn("account number", items["UMB-0815"].reason)
+        self.assertIn("it holds %r" % "\t", items["UMB-0815"].reason)
+        self.assertIn("it holds %r" % "\x7f", items["GLX\x7f4711"].reason)
 
     def test_an_item_not_yet_due_is_not_selected(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
@@ -1083,6 +1125,24 @@ class TheNachaFileHeader(unittest.TestCase):
         run = PaymentRun(closed_port(), closed_port(), dict(ACME, company_id="0" * 11),
                          "nacha").run(datetime.date(2026, 10, 2), "R1")
         self.assertIn("company identification", run.problems[0])
+
+    def test_a_control_character_in_the_company_is_refused(self):
+        # ASCII, so `str.isascii()` passed it, and no character a record holds.
+        for company, named in ((dict(ACME, name="ACME\nCORP"), "company name"),
+                               (dict(ACME, company_id="12345\t6789"),
+                                "company identification")):
+            run = PaymentRun(closed_port(), closed_port(), company, "nacha").run(
+                datetime.date(2026, 10, 2), "R1")
+            self.assertEqual(run.items, [])
+            self.assertIn(named, run.problems[0])
+            self.assertIn("printable ASCII", run.problems[0])
+            self.assertIn("it holds", run.problems[0])
+
+    def test_every_printable_character_is_one_a_record_holds(self):
+        printable = "".join(chr(code) for code in range(0x20, 0x7F))
+        self.assertEqual(payment_run_module.unprintable(printable), [])
+        self.assertEqual(payment_run_module.unprintable("a\x1f\x7f\u00e9\x1f"),
+                         ["\x1f", "\x7f", "\u00e9"])
 
     def test_a_bare_status_line_is_read_as_no_status(self):
         run = Run(datetime.date(2026, 10, 2), "R1", [

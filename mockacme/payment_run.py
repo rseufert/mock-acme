@@ -125,8 +125,23 @@ WHAT = {"camt.053": "statement", "bai2": "BAI2 statement",
 # `nacha_time_and_modifier`), the 36 file ID modifiers, and the first amount an
 # entry's ten digits of cents cannot hold.
 IDENTIFICATION = re.compile(r"[A-Z0-9]{1,3}")
+# What a NACHA record holds: the printable characters of ASCII. A control
+# character is ASCII too, and a line feed among them ends the record where it
+# stands, so `str.isascii()` is not the test.
+NACHA_PRINTABLE = re.compile(r"[ -~]*")
 ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 NACHA_AMOUNT_LIMIT = Decimal("100000000.00")
+
+
+def unprintable(text: str) -> List[str]:
+    """The characters of `text` a NACHA record does not hold, each once."""
+    return sorted(set(NACHA_PRINTABLE.sub("", text)))
+
+
+def naming(text: str) -> str:
+    """The end of a refusal: which characters they are, or "" if there are none."""
+    found = unprintable(text)
+    return ": it holds %s" % ", ".join(repr(c) for c in found) if found else ""
 
 
 def odata(base: str, path: str, **query) -> List[Dict]:
@@ -430,10 +445,12 @@ class PaymentRun:
             return ("identification %r is not one to three capital letters or digits, "
                     "which is what a NACHA file header can tell apart" % identification)
         company_id, name = self.company["company_id"], self.company["name"]
-        if len(company_id) > 10 or not company_id.isascii():
-            return "company identification %r is not ten ASCII characters or fewer" % company_id
-        if not name.isascii():
-            return "company name %r is not ASCII, which a NACHA file is" % name
+        if len(company_id) > 10 or unprintable(company_id):
+            return ("company identification %r is not ten printable ASCII characters "
+                    "or fewer%s" % (company_id, naming(company_id)))
+        if unprintable(name):
+            return ("company name %r is not printable ASCII, which a NACHA file "
+                    "is%s" % (name, naming(name)))
         return ""
 
     # -- 1. select -------------------------------------------------------------
@@ -487,14 +504,15 @@ class PaymentRun:
                 "an ACH credit" if self.nacha else "a SEPA transfer", self.currency,
                 item.currency)
             return
-        if self.nacha and (len(item.reference) > 15 or not item.reference.isascii()
+        if self.nacha and (len(item.reference) > 15 or unprintable(item.reference)
                            or " " in item.reference):
             # The individual identification number holds 15; one cut short
             # would be a reference the supplier cannot match, and one with a
             # space could not be read back from the acknowledgement's words.
             item.status, item.reason = "skipped", (
-                "reference %r is not up to 15 ASCII characters without a space, "
-                "as a NACHA entry's identification number is" % item.reference)
+                "reference %r is not up to 15 printable ASCII characters without a "
+                "space, as a NACHA entry's identification number is%s"
+                % (item.reference, naming(item.reference)))
             return
         if self.nacha:
             cannot_carry = sorted({c for c in item.reference if c in UNCARRIABLE})
@@ -529,14 +547,19 @@ class PaymentRun:
                 item.status, item.reason = "skipped", (
                     "no ABA routing and account number for account %s of %s"
                     % (invoice["BPBankAccountInternalID"], item.supplier))
-            elif len(item.account) > 17 or not item.account.isascii():
+            elif len(item.account) > 17:
                 # Cut short, an account number is somebody else's account.
                 item.status, item.reason = "skipped", (
                     "account number %r is longer than a NACHA entry's 17 characters"
                     % item.account)
-            elif not item.name.isascii():
+            elif unprintable(item.account):
                 item.status, item.reason = "skipped", (
-                    "name %r is not ASCII, which a NACHA file is" % item.name)
+                    "account number %r is not printable ASCII, which a NACHA file "
+                    "is%s" % (item.account, naming(item.account)))
+            elif unprintable(item.name):
+                item.status, item.reason = "skipped", (
+                    "name %r is not printable ASCII, which a NACHA file is%s"
+                    % (item.name, naming(item.name)))
 
     # -- 2. send ---------------------------------------------------------------
 
