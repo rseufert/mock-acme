@@ -8,6 +8,14 @@ says so where it does.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.2] - 2026-10-06
+
+One fix to the payment run, in both formats: a payment file the bank refused
+whole could leave its invoices held in SAP for a payment that did not exist,
+with nothing reported. Nothing else changes.
+
 ### Fixed
 
 - **A payment file the bank refuses whole is a refusal, whether or not the
@@ -229,6 +237,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.3.2]: https://github.com/rseufert/mock-acme/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/rseufert/mock-acme/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rseufert/mock-acme/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rseufert/mock-acme/compare/v0.1.0...v0.2.0
