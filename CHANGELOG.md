@@ -8,7 +8,31 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`procure_to_pay`: a backorder, and an invoice ahead of its ship notice**
+  ([#33]). Two scenarios in `tests/test_procure_to_pay.py`. A supplier with
+  less in stock than was ordered ships the rest later: two ship notices, two
+  invoices and two payables against one purchase order, neither taken for a
+  copy of the other, each paid once, in one run or in two. And an invoice
+  that arrives before its ship notice is held, a payment run that fires
+  meanwhile pays nothing for it, and the run after the notice arrives pays
+  it once. The backorder needs **mock-edi 0.9.0**.
+
+### Changed
+
+- **`invoice_check` matches an invoice to the shipment it names, and holds it
+  while that shipment's notice has not arrived** ([#33]). An 810 can name its
+  shipment (`REF*SI`), which is the number on the 856 (`BSN02`). Such an
+  invoice is now compared with that ship notice, not with the order's latest;
+  and if the notice is not there the result is `held`, the invoice is kept,
+  and it posts on the run after the notice comes. **Changes behaviour:** it
+  was `blocked` for billing more than was shipped, and dropped, so it never
+  posted when the notice did come. And where two deliveries of one order were
+  read together, the first invoice was blocked against the second delivery's
+  notice; it now posts. An invoice with anything else wrong is blocked at
+  once, as before, and one that names no shipment is matched as before.
+  `read_810` returns `shipment`; `shipment_number` reads an 856's.
 
 ## [0.4.0] - 2026-10-07
 
@@ -278,4 +302,5 @@ These differ from the last copies the mocks carried.
 [#25]: https://github.com/rseufert/mock-acme/issues/25
 [#27]: https://github.com/rseufert/mock-acme/issues/27
 [#30]: https://github.com/rseufert/mock-acme/issues/30
+[#33]: https://github.com/rseufert/mock-acme/issues/33
 [#34]: https://github.com/rseufert/mock-acme/issues/34

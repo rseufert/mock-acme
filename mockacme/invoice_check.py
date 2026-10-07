@@ -7,6 +7,7 @@ is posted into SAP (as an inbound INVOIC IDoc) only if
     - it bills no more than the purchase order asked for, counting what
       earlier invoices for the same order have already billed,
     - it bills no more than the supplier's 856 ship notice said was shipped,
+      and where the invoice names its shipment, that shipment's notice,
     - its total adds up, tax included, and
     - it has not been posted before.
 
@@ -22,6 +23,18 @@ An IDoc SAP accepted is not an invoice SAP posted, so the status record that
 comes back decides: only status 53 counts as posted.
 
 Anything else is blocked with the reasons, for a person to look at.
+
+**An invoice ahead of its ship notice is held, not blocked and not posted.**
+A supplier's 810 can name the shipment it bills (`REF*SI`), which is the
+number its 856 carries (`BSN02`). Such an invoice is matched against that
+consignment and no other, so a backorder's invoice is not let through on the
+strength of the first delivery. If that 856 has not arrived the invoice is
+`held`: kept, reported on every run, and posted on the run after the notice
+comes. Nothing reaches SAP in between, so no payment run can pay for goods
+nobody has said were sent. Anything else wrong with it blocks it at once: a
+wrong price does not get better when the goods arrive. An invoice that names
+no shipment is matched against the order's latest notice, as before, and is
+blocked if it bills more.
 
 **No over-delivery tolerance is read.** A real purchase order item can allow
 some, as a percentage. mock-sap's item carries no such field, so none is
@@ -149,8 +162,19 @@ def read_856(payload):
     return po_number, shipped
 
 
+def shipment_number(payload):
+    """The number a ship notice gives its consignment (`BSN02`), or ""."""
+    for fields in segments(payload):
+        if fields[0] == "BSN" and len(fields) > 2:
+            return fields[2]
+    return ""
+
+
 def read_810(payload):
     """The invoice as a dict: number, po, date, currency, terms, lines, tax, total.
+
+    And ``shipment``: the consignment the invoice says it bills (``REF*SI``),
+    or "" where it names none.
 
     The three-way match needs only the numbers, but posting the invoice needs
     what it was billed *on*: ``BIG01`` is the invoice date, which becomes the
@@ -163,13 +187,15 @@ def read_810(payload):
     them, so a reader that skips ``TXI`` sees a total its lines do not reach.
     """
     invoice = {"lines": {}, "date": "", "currency": "", "net_days": None,
-               "tax": Decimal("0.00")}
+               "tax": Decimal("0.00"), "shipment": ""}
     for fields in segments(payload):
         if fields[0] == "BIG":
             invoice["date"] = fields[1]
             invoice["number"], invoice["po"] = fields[2], fields[4]
         elif fields[0] == "CUR":
             invoice["currency"] = fields[2] if len(fields) > 2 else ""
+        elif fields[0] == "REF" and len(fields) > 2 and fields[1] == "SI":
+            invoice["shipment"] = fields[2]
         elif fields[0] == "ITD":
             # ITD07 is the net days; an ITD that does not carry them leaves the
             # invoice on no terms rather than on invented ones.
@@ -250,6 +276,9 @@ class InvoiceCheck:
     def __init__(self, sap, edi_base, our_id):
         self.sap, self.edi_base, self.our_id = sap, edi_base, our_id
         self.shipped = {}       # po_number -> {item: quantity}, from 856s
+        # (po_number, shipment number) -> {item: quantity}: each 856 by the
+        # consignment it advises, for an invoice that names the one it bills.
+        self.notices = {}
         self.posted = set()     # invoice numbers already in SAP
         self.billed = {}        # po_number -> {item: quantity}, from what was posted
         # 810s collected and not yet dealt with: (invoice, whether an earlier
@@ -276,12 +305,27 @@ class InvoiceCheck:
         return ["SAP did not answer when invoice %s was sent on an earlier run, so "
                 "it may hold it already; it was not sent again" % invoice["number"]]
 
+    def awaited(self, invoice):
+        """The shipment an invoice names whose ship notice has not arrived, or ""."""
+        named = invoice.get("shipment") or ""
+        return "" if (invoice["po"], named) in self.notices else named
+
+    def shipped_for(self, invoice):
+        """What the ship notice this invoice is matched against says was sent:
+        the notice of the shipment it names, or the order's latest where it
+        names none. None while the one it names has not arrived, which is not
+        a quantity to compare with."""
+        named = invoice.get("shipment") or ""
+        if not named:
+            return self.shipped.get(invoice["po"], {})
+        return self.notices.get((invoice["po"], named))
+
     def problems(self, invoice, po):
         """Why this invoice must not be posted; empty if it may be."""
         if invoice["number"] in self.posted:
             return ["invoice %s has already been posted" % invoice["number"]]
         ordered = {i["PurchaseOrderItem"]: i for i in po["to_PurchaseOrderItem"]["results"]}
-        shipped = self.shipped.get(invoice["po"], {})
+        shipped = self.shipped_for(invoice)
         found, total = [], Decimal(0)
         # Before any amount is compared: the same number in another currency is
         # not the same price. Every check below subtracts and compares bare
@@ -308,7 +352,7 @@ class InvoiceCheck:
                 found.append("item %s bills %s%s, ordered %s" % (
                     item, qty, ", with %s already billed" % x12_quantity(before)
                     if before else "", x12_quantity(asked_for)))
-            if qty > shipped.get(item, 0):
+            if shipped is not None and qty > shipped.get(item, 0):
                 found.append("item %s bills %s, shipped %s" % (item, qty, shipped.get(item, 0)))
         tax = invoice.get("tax") or Decimal("0.00")
         if total + tax != invoice["total"]:
@@ -334,6 +378,9 @@ class InvoiceCheck:
             if doc["code"] == "856":
                 po_number, lines = read_856(doc["payload"])
                 self.shipped.setdefault(po_number, {}).update(lines)
+                number = shipment_number(doc["payload"])
+                if number:
+                    self.notices[(po_number, number)] = lines
         # Kept before anything is asked of SAP, so that an invoice SAP cannot
         # be asked about is still here next time (#13).
         self.pending += [(read_810(doc["payload"]), False)
@@ -349,6 +396,9 @@ class InvoiceCheck:
 
     def check_one(self, invoice, unanswered):
         """One invoice: matched, and posted or blocked, or left for the next run.
+
+        Left for the next run is `waiting`, where SAP could not be asked or
+        did not answer, or `held`, where its ship notice has not arrived.
 
         Returns the result and what to keep: `None` when the invoice is dealt
         with, otherwise whether its IDoc has been sent with no answer.
@@ -384,6 +434,15 @@ class InvoiceCheck:
         if result["problems"]:
             result["status"] = "blocked"
             return result, None
+        awaited = self.awaited(invoice)
+        if awaited:
+            # Nothing else is wrong with it, and nothing says the goods were
+            # sent. Not posted, so nothing can pay it; kept, so that it posts
+            # when the notice comes.
+            result.update(status="held", problems=[
+                "invoice %s bills shipment %s, and no ship notice for that shipment has "
+                "arrived, so it was kept for the next run" % (invoice["number"], awaited)])
+            return result, unanswered
         try:
             receipt = self.sap.request("POST", "/sap/bc/idoc",
                                        invoic_idoc(invoice, po), "application/xml")

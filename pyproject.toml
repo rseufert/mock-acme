@@ -36,7 +36,7 @@ dependencies = []
 # mock-sap 0.19.0 is a real floor: it is the first that reads what a credit on
 # a statement says it is, and `payment_run` relies on that to post money
 # arriving with its reference. The other two carry no floor anyone has found.
-test = ["mock-sap>=0.19.0", "mock-edi", "mock-bank", "mock-einvoice"]
+test = ["mock-sap>=0.19.0", "mock-edi>=0.9.0", "mock-bank", "mock-einvoice"]
 
 [project.urls]
 Repository = "https://github.com/rseufert/mock-acme"

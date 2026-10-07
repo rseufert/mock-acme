@@ -51,7 +51,7 @@ import urllib.parse
 import urllib.request
 from decimal import Decimal
 
-from mockacme.invoice_check import PO_SERVICE, Sap
+from mockacme.invoice_check import PO_SERVICE, Sap, read_810
 from mockacme.payment_run import ITEMS, OPEN_SUPPLIER_ITEMS, Register, odata
 from mockacme.procure_to_pay import DurableInvoiceCheck, ProcureToPay, odata_string
 
@@ -119,8 +119,8 @@ class PurchaseCase(unittest.TestCase):
 
         Which documents are resent turns out to matter, and the reason is worth
         knowing. A restarted middleware has forgotten its ship notices as well as
-        what it posted, so an invoice arriving alone is blocked for billing more
-        than was shipped - `item 00010 bills 100, shipped 0`. That is protection
+        what it posted, so an invoice arriving alone is held for the notice of
+        the shipment it names. That is protection
         by accident, from a second thing being lost rather than from anything
         checking. Resend the despatch advice with it, as a partner replaying a
         batch does, and the invoice posts again.
@@ -331,7 +331,7 @@ class TestTheSameInvoiceTwice(PurchaseCase):
 
         There is a second near miss upstream, in `supplier_resends`: a restarted
         middleware has also forgotten its ship notices, so an invoice arriving on
-        its own is blocked for billing more than was shipped. Both near misses
+        its own is held for a ship notice that will not come again. Both near misses
         are accidents of what else was lost, and neither is a check.
         """
         plain = self.middleware(durable=False)
@@ -375,15 +375,16 @@ class TestTheSameInvoiceTwice(PurchaseCase):
         self.assertFalse(self.p2p.check.already_posted(reference, INITECH),
                          "another supplier's invoice of the same number is not ours")
 
-    def test_a_resent_invoice_alone_is_blocked_for_the_wrong_reason(self):
+    def test_a_resent_invoice_alone_is_stopped_for_the_wrong_reason(self):
         """The upstream near miss, held by a test rather than only described.
 
-        Resend only the invoice and a restarted middleware does block it - but
-        for billing more than was shipped, because the restart forgot the ship
-        notice too. That is a second thing being missing, not the duplicate being
-        caught, and it is why `test_2` resends the despatch advice as well. If
-        this ever starts failing with a different reason, the story the example
-        tells about accidental protection has changed.
+        Resend only the invoice and a restarted middleware does not post it -
+        but because it waits for the ship notice of the shipment the invoice
+        names, which the restart forgot too. That is a second thing being
+        missing, not the duplicate being caught, and it is why `test_2` resends
+        the despatch advice as well. If this ever starts failing with a
+        different reason, the story the example tells about accidental
+        protection has changed.
         """
         po = self.purchase()
         self.p2p.approve()
@@ -392,10 +393,11 @@ class TestTheSameInvoiceTwice(PurchaseCase):
         restarted = self.middleware(durable=False)     # no SAP check, so the
         [result] = restarted.approve()                 # only objection is the match
 
-        self.assertEqual(result["status"], "blocked")
-        self.assertTrue(any("bills 100, shipped 0" in p for p in result["problems"]),
-                        result["problems"])
+        self.assertEqual(result["status"], "held")
+        self.assertIn("no ship notice for that shipment has arrived", result["problems"][0])
         self.assertEqual(len(self.open_items()), 1, "still one thing owed, not two")
+        # And it is still waiting on the next run, and the one after.
+        self.assertEqual([r["status"] for r in restarted.approve()], ["held"])
 
     def test_an_invoice_number_holding_a_quote_is_asked_about_correctly(self):
         """`O'BRIEN-014` is a supplier's invoice number, not OData syntax.
@@ -479,6 +481,261 @@ class TestWhatNeverReachesTheBank(PurchaseCase):
         [paid] = run.items
         self.assertEqual(Decimal(paid.amount), billed,
                          "the bank moved what the supplier billed")
+
+
+class TestOneOrderTwoDeliveries(PurchaseCase):
+    """A supplier with less in stock than was ordered ships the rest later
+    (mock-edi 0.9.0): two ship notices and two invoices against one order."""
+
+    STOCK, ORDERED = Decimal("4200"), "5000"        # of WIDGET-001, at 12.50
+
+    def backorder_ships(self):
+        """Move the supplier's clock to the day the balance was promised."""
+        released = control(EDI, "POST", "/_mock/advance?all")
+        self.assertEqual(released["count"], 2, released)      # an 856 and an 810
+
+    def owed(self):
+        return sorted(abs(Decimal(item["AmountInTransactionCurrency"]))
+                      for item in self.open_items())
+
+    def bank_moved(self):
+        """What the bank was asked to move; it keeps amounts in cents."""
+        return sorted(Decimal(payment["amount"]) / 100
+                      for payment in control(BANK, "GET", "/_mock/payments"))
+
+    def test_a_backorder_is_a_second_payable_and_each_is_paid_once(self):
+        po = self.purchase(quantity=self.ORDERED)
+        [first] = self.p2p.approve()
+        self.assertEqual((first["status"], first["problems"]), ("posted", []))
+        self.assertEqual(self.owed(), [Decimal("52500.00")])        # 4200 at 12.50
+
+        # The first is paid before the balance ships.
+        run = self.pay_what_is_due("RUN1")
+        self.assertEqual([i.status for i in run.items], ["cleared"])
+        self.assertEqual(self.open_items(), [])
+
+        self.backorder_ships()
+        [second] = self.p2p.approve()
+        self.assertEqual((second["status"], second["problems"], second["po"]),
+                         ("posted", [], po))
+        self.assertNotEqual(second["invoice"], first["invoice"])
+        # The second arriving does not owe the first again.
+        self.assertEqual(self.owed(), [Decimal("10000.00")])        # 800 at 12.50
+
+        run = self.pay_what_is_due("RUN2")
+        self.assertEqual([(i.status, Decimal(i.amount)) for i in run.items],
+                         [("cleared", Decimal("10000.00"))])
+        self.assertEqual(self.open_items(), [])
+        self.assertEqual(self.bank_moved(), [Decimal("10000.00"), Decimal("52500.00")])
+        # Two supplier invoices in SAP for the one order, and a third run has
+        # nothing to pay.
+        self.assertEqual(len(self.invoice_numbers(first["invoice"])
+                             | self.invoice_numbers(second["invoice"])), 2)
+        self.assertEqual(self.p2p.pay(self.bank_today(), "RUN3").items, [])
+
+    def test_both_owed_at_once_are_two_payments_in_one_run(self):
+        self.purchase(quantity=self.ORDERED)
+        self.p2p.approve()
+        self.backorder_ships()
+        self.p2p.approve()
+        self.assertEqual(self.owed(), [Decimal("10000.00"), Decimal("52500.00")])
+
+        run = self.pay_what_is_due("RUN1")
+        # Neither is skipped as the other's copy: they are two invoices.
+        self.assertEqual(sorted((i.status, Decimal(i.amount)) for i in run.items),
+                         [("cleared", Decimal("10000.00")), ("cleared", Decimal("52500.00"))])
+        self.assertEqual(len({i.reference for i in run.items}), 2)
+        self.assertEqual(self.bank_moved(), [Decimal("10000.00"), Decimal("52500.00")])
+
+    def test_the_first_invoice_arriving_again_is_still_a_duplicate(self):
+        """The second invoice is not the first again, and the first again is."""
+        po = self.purchase(quantity=self.ORDERED)
+        [first] = self.p2p.approve()
+        self.backorder_ships()
+        # The first, a second time: the same bytes from the supplier's outbox.
+        first_810 = min(row["id"] for row in control(EDI, "GET", "/_mock/outbox")
+                        if row["code"] == "810" and row["reference"] == po)
+        control(EDI, "POST", "/_mock/outbox/%d/resend" % first_810)
+        results = {r["invoice"]: r for r in self.p2p.approve()}
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[first["invoice"]]["status"], "blocked")
+        self.assertIn("is already in SAP", results[first["invoice"]]["problems"][0])
+        [second] = [r for number, r in results.items() if number != first["invoice"]]
+        self.assertEqual(second["status"], "posted")
+        self.assertEqual(self.owed(), [Decimal("10000.00"), Decimal("52500.00")])
+
+    def test_both_deliveries_read_together_are_each_matched_to_its_own(self):
+        """Nothing is read until the balance has shipped. The order's latest
+        ship notice is then the balance's, for 800, and the first invoice
+        bills 4200: it is matched against the shipment it names."""
+        self.purchase(quantity=self.ORDERED)
+        self.backorder_ships()
+        results = self.p2p.approve()
+        self.assertEqual([(r["status"], r["problems"]) for r in results],
+                         [("posted", []), ("posted", [])])
+        self.assertEqual(self.owed(), [Decimal("10000.00"), Decimal("52500.00")])
+
+    def test_an_invoice_for_more_than_its_own_shipment_is_blocked(self):
+        self.purchase(quantity=self.ORDERED)
+        [invoice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=invoice")
+        self.assertIn("IT1*00010*4200*EA*", invoice["payload"])
+        self.assertEqual(self.p2p.approve(), [])        # the ship notice, and no invoice
+        more = read_810(invoice["payload"].replace("IT1*00010*4200*EA*", "IT1*00010*4201*EA*"))
+        self.p2p.check.pending.append((more, False))
+        [result] = self.p2p.approve()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("item 00010 bills 4201, shipped 4200", result["problems"])
+
+    def test_a_shipment_billed_twice_under_two_numbers_is_posted_twice(self):
+        """Known to be wrong, and in the README: what is billed is counted
+        against the order, not against each shipment."""
+        self.purchase(quantity=self.ORDERED)
+        [invoice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=invoice&leave=true")
+        [first] = self.p2p.approve()
+        # The same shipment again, for the 800 that have not shipped, under a
+        # number of its own.
+        again = read_810(invoice["payload"]
+                         .replace(first["invoice"], "INV-AGAIN")
+                         .replace("IT1*00010*4200*EA*", "IT1*00010*800*EA*")
+                         .replace("TDS*5250000", "TDS*1000000"))
+        self.assertEqual(again["shipment"], read_810(invoice["payload"])["shipment"])
+        self.p2p.check.pending.append((again, False))
+        [result] = self.p2p.approve()
+        self.assertEqual((result["status"], result["problems"]), ("posted", []))
+        self.assertEqual(self.owed(), [Decimal("10000.00"), Decimal("52500.00")])
+        # And the balance's own invoice, when it ships, is the one refused.
+        self.backorder_ships()
+        [real] = self.p2p.approve()
+        self.assertEqual(real["status"], "blocked")
+        self.assertIn("with 5000 already billed, ordered 5000", real["problems"][0])
+
+    def test_the_backorders_invoice_is_not_let_through_on_the_first_delivery(self):
+        """Its own ship notice is the one it waits for: the first delivery's
+        is for other goods."""
+        self.purchase(quantity=self.ORDERED)
+        self.p2p.approve()
+        self.backorder_ships()
+        [notice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=despatch")
+        [held] = self.p2p.approve()
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(self.owed(), [Decimal("52500.00")])
+
+
+class TestAnInvoiceAheadOfItsShipNotice(PurchaseCase):
+    """The supplier bills before it advises (`out-of-order`), and the advice
+    is late.
+
+    mock-edi releases the 810 and the 856 in the same moment, the invoice
+    first, so middleware that reads its mailbox sees both together. For the
+    invoice to be seen alone the test takes the 856 out of the mailbox, as a
+    notice still in transit, and has the supplier send it again when it is
+    to land.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.supplier_behaves("out-of-order")
+
+    def notice_in_transit(self):
+        """Take the 856 out of the mailbox; its place in the supplier's outbox."""
+        [notice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=despatch")
+        self.assertEqual(notice["code"], "856")
+        [sent] = [row for row in control(EDI, "GET", "/_mock/outbox")
+                  if row["code"] == "856"]
+        return sent["id"]
+
+    def notice_lands(self, outbox_id):
+        control(EDI, "POST", "/_mock/outbox/%d/resend" % outbox_id)
+
+    def test_the_invoice_goes_out_before_the_ship_notice(self):
+        self.purchase()
+        codes = [d["code"] for d in control(EDI, "GET", "/_mock/mailbox?partner=ACME&leave=true")]
+        self.assertLess(codes.index("810"), codes.index("856"), codes)
+        # Read together they match: the order they came in does not matter.
+        self.assertEqual([r["status"] for r in self.p2p.approve()], ["posted"])
+
+    def test_an_invoice_ahead_of_its_ship_notice_is_not_paid_until_the_notice_comes(self):
+        self.purchase()
+        notice = self.notice_in_transit()
+
+        [held] = self.p2p.approve()
+        self.assertEqual(held["status"], "held")
+        self.assertRegex(held["problems"][0], r"^invoice \S+ bills shipment \S+, and no ship "
+                                              r"notice for that shipment has arrived")
+        self.assertEqual(self.open_items(), [], "nothing is owed for goods nobody advised")
+
+        # A run that fires while it is held pays nothing for it.
+        run = self.p2p.pay(self.bank_today() + datetime.timedelta(days=60), "RUN1")
+        self.assertEqual(run.items, [])
+        self.assertEqual(control(BANK, "GET", "/_mock/payments"), [])
+        # And it is still held on a later look, not dropped and not posted.
+        self.assertEqual([r["status"] for r in self.p2p.approve()], ["held"])
+
+        self.notice_lands(notice)
+        [posted] = self.p2p.approve()
+        self.assertEqual((posted["status"], posted["problems"], posted["invoice"]),
+                         ("posted", [], held["invoice"]))
+        self.assertEqual(len(self.open_items()), 1)
+
+        # The next run pays it, once.
+        run = self.pay_what_is_due("RUN2")
+        self.assertEqual([i.status for i in run.items], ["cleared"])
+        self.assertEqual(len(control(BANK, "GET", "/_mock/payments")), 1)
+        self.assertEqual(self.p2p.approve(), [])
+        self.assertEqual(self.p2p.pay(self.bank_today(), "RUN3").items, [])
+
+    def test_the_run_meanwhile_pays_what_is_matched_and_not_what_is_held(self):
+        self.purchase()
+        notice = self.notice_in_transit()
+        self.supplier_behaves("accept")
+        self.purchase(quantity="50")
+        statuses = sorted(r["status"] for r in self.p2p.approve())
+        self.assertEqual(statuses, ["held", "posted"])
+
+        run = self.pay_what_is_due("RUN1")
+        self.assertEqual([(i.status, Decimal(i.amount)) for i in run.items],
+                         [("cleared", Decimal("625.00"))])
+
+        self.notice_lands(notice)
+        self.assertEqual([r["status"] for r in self.p2p.approve()], ["posted"])
+        run = self.pay_what_is_due("RUN2")
+        self.assertEqual([(i.status, Decimal(i.amount)) for i in run.items],
+                         [("cleared", Decimal("1250.00"))])
+        self.assertEqual(len(control(BANK, "GET", "/_mock/payments")), 2)
+
+    def test_an_invoice_that_names_no_shipment_is_blocked_as_it_always_was(self):
+        """With nothing to say which ship notice to wait for, it is matched
+        against what has come, and nothing has."""
+        self.purchase()
+        self.notice_in_transit()
+        [invoice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=invoice")
+        [named] = [segment for segment in invoice["payload"].split("~")
+                   if segment.strip().startswith("REF*SI*")]
+        unnamed = read_810(invoice["payload"].replace(named + "~", ""))
+        self.assertEqual((unnamed["shipment"], read_810(invoice["payload"])["shipment"]),
+                         ("", named.strip().split("*")[2]))
+        self.p2p.check.pending.append((unnamed, False))
+        [result] = self.p2p.approve()
+        self.assertEqual((result["status"], result["problems"]),
+                         ("blocked", ["item 00010 bills 100, shipped 0"]))
+        self.assertEqual(self.p2p.check.pending, [])
+
+    def test_a_held_invoice_that_is_wrong_as_well_is_blocked_at_once(self):
+        """A price that is not the order's does not get better when the goods come."""
+        po = self.purchase()
+        self.notice_in_transit()
+        [invoice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=invoice")
+        self.assertIn("IT1*00010*100*EA*12.50*", invoice["payload"])
+        check = self.p2p.check
+        dearer = read_810(invoice["payload"].replace("IT1*00010*100*EA*12.50*",
+                                                     "IT1*00010*100*EA*12.75*"))
+        check.pending.append((dearer, False))
+        [result] = check.run()
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["po"], po)
+        self.assertTrue(any("billed at 12.75, ordered at 12.50" in p
+                            for p in result["problems"]), result["problems"])
+        self.assertEqual(check.pending, [])
 
 
 class TestWhenTheBankSaysNo(PurchaseCase):
