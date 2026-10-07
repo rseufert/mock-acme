@@ -8,7 +8,31 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+Tests and words only; nothing in the package behaves differently. The tests
+need mock-sap 0.21.0.
+
+### Added
+
+- **Tests for where mock-sap's reading of a statement line turns on the run's
+  claim** ([#44]). Two suppliers billing the same invoice number for the same
+  amount both fit the bank's line. From mock-sap 0.21.0 the one a payment run
+  has claimed is cleared, where up to 0.20.0 neither was; the claim is the
+  `PaymentRunID` this run writes, and nothing here ran that against SAP. The
+  tests say which mock-sap their answer belongs to, and the `test` extra asks
+  for **mock-sap 0.21.0**. `payment_run` itself still needs 0.19.0.
+- **A test for a statement line with no reference** ([#44]). A BAI2 `16`
+  record may carry none; it is read as an empty reference and goes to SAP as
+  one. mock-sap then clears nothing, even with one open item of that amount
+  claimed by the run: it does not match on the amount alone. The README says
+  so under "Known to be wrong", because the run reports it only on the
+  statement's record.
+
+### Fixed
+
+- **The comment on why a debit carries no `LINACTION`** ([#44]). It said SAP
+  does not look. From mock-sap 0.21.0 it does: a debit carrying `RET` is money
+  this company received going back, and clears no payable. What is written is
+  unchanged.
 
 ## [0.5.0] - 2026-10-07
 
@@ -333,3 +357,4 @@ These differ from the last copies the mocks carried.
 [#33]: https://github.com/rseufert/mock-acme/issues/33
 [#34]: https://github.com/rseufert/mock-acme/issues/34
 [#37]: https://github.com/rseufert/mock-acme/issues/37
+[#44]: https://github.com/rseufert/mock-acme/issues/44

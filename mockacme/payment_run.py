@@ -1066,7 +1066,10 @@ class PaymentRun:
             reference = (
                 "<E1EDP02 SEGMENT=\"1\"><QUALF>009</QUALF><BELNR>%s</BELNR></E1EDP02>"
                 % escape(line["end_to_end_id"]))
-            # Not on a debit: money out has one reading, and SAP does not look.
+            # Not on a debit. From mock-sap 0.21.0 SAP reads it there too
+            # (mock-sap#181): a debit carrying `RET` is money this company
+            # received going back, and clears no payable. A payment of ours
+            # must carry no action.
             action = "" if line["side"] != "CRDT" else (
                 "<LINACTION>%s</LINACTION>" % (RETURNED if line["returned"] else RECEIVED))
             body.append(

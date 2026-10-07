@@ -145,6 +145,14 @@ It has other edges:
   whoever posts the statements has to be given the same register, or its entry
   outlives the claim and holds an item SAP says is free.
 
+A payment the bank reports without its reference is not cleared, and the run
+does not say so. A statement line that quotes nothing goes to SAP quoting
+nothing, mock-sap matches no item to it (it does not fall back to the amount),
+and the invoice stays open and claimed by the run that paid it. The line and
+SAP's reason are on the statement's record; the run's problems do not name it
+([#44](https://github.com/rseufert/mock-acme/issues/44)). mock-bank always
+gives the reference back, so this takes a statement from somewhere else.
+
 Money arriving is posted to SAP and nothing comes of it. Each credit on the
 statement says whether it is a payment coming back or money arriving, so SAP
 no longer takes a receipt for a return, but posting it against a receivable is
