@@ -19,6 +19,15 @@ says so where it does.
   as well. Each is now held to printable ASCII (0x20 to 0x7E), so the one item
   is skipped, or the run refused if it is the company's, and the reason names
   the character.
+- **A routing number that is not nine digits no longer reaches an ACH file**
+  ([#27]). A supplier's was checked with `str.isdigit()`, which is true of
+  digits that are not 0 to 9, and the bank refused the whole file. The
+  company's was not checked at all: with eight digits or ten the file went,
+  no acknowledgement named it, and its items stayed `sent` with no problem
+  reported; with none the run raised `KeyError`. Now a supplier's skips that
+  item and the rest are paid, and the company's refuses the run before
+  anything is selected. The check digit is still left to the bank, which
+  rejects that one entry.
 
 ## [0.3.0] - 2026-10-05
 
@@ -211,3 +220,4 @@ These differ from the last copies the mocks carried.
 [#18]: https://github.com/rseufert/mock-acme/issues/18
 [#21]: https://github.com/rseufert/mock-acme/issues/21
 [#25]: https://github.com/rseufert/mock-acme/issues/25
+[#27]: https://github.com/rseufert/mock-acme/issues/27

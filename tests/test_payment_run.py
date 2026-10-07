@@ -288,6 +288,36 @@ class PayingOpenItems(MocksCase):
         self.assertIn("it holds %r" % "\t", items["UMB-0815"].reason)
         self.assertIn("it holds %r" % "\x7f", items["GLX\x7f4711"].reason)
 
+    @unittest.skipUnless(NACHA, "what a NACHA record cannot hold")
+    def test_a_routing_number_that_is_not_nine_digits_skips_the_item(self):
+        # The second and third are digits to `str.isdigit()` and to nobody else.
+        for routing in ("02100002", "02100002\u00b2",
+                        "\u0660\u0662\u0661\u0660\u0660\u0660\u0660\u0662\u0661",
+                        "0210000210", "02100002X"):
+            with self.subTest(routing=routing):
+                self.setUp()
+                self.sap.domestic_bank(UMBRELLA, routing, "12345")
+                self.sap.invoice(UMBRELLA, "UMB-0815", "238.00")
+                self.sap.invoice(GLOBEX, "GLX-4711", "5.00")
+                run = self.payments.run(self.today, "R1")
+                items = self.by_reference(run)
+                self.assertEqual({r: i.status for r, i in items.items()},
+                                 {"UMB-0815": "skipped", "GLX-4711": "accepted"},
+                                 [i.reason for i in run.items] + run.problems)
+                self.assertIn("routing number %r" % routing, items["UMB-0815"].reason)
+                self.assertIn("is not nine digits", items["UMB-0815"].reason)
+                status, _body = call(BANK, "GET", "/_mock/payments/UMB-0815")
+                self.assertEqual(status, 404)
+
+    @unittest.skipUnless(NACHA, "what the bank does with a wrong check digit")
+    def test_a_wrong_check_digit_is_left_to_the_bank_which_refuses_that_entry(self):
+        self.sap.domestic_bank(UMBRELLA, "021000022", "12345")
+        self.sap.invoice(UMBRELLA, "UMB-0815", "238.00")
+        self.sap.invoice(GLOBEX, "GLX-4711", "5.00")
+        items = self.by_reference(self.payments.run(self.today, "R1"))
+        self.assertEqual({r: (i.status, i.reason) for r, i in items.items()},
+                         {"UMB-0815": ("rejected", "R03"), "GLX-4711": ("accepted", "")})
+
     def test_an_item_not_yet_due_is_not_selected(self):
         self.sap.invoice(GLOBEX, "GLX-4711", "1190.00")
         self.sap.invoice(GLOBEX, "GLX-4712", "50.00", terms="NT30")
@@ -1137,6 +1167,19 @@ class TheNachaFileHeader(unittest.TestCase):
             self.assertIn(named, run.problems[0])
             self.assertIn("printable ASCII", run.problems[0])
             self.assertIn("it holds", run.problems[0])
+
+    def test_a_company_routing_number_that_is_not_nine_digits_is_refused(self):
+        without = {key: value for key, value in ACME.items() if key != "routing"}
+        for company in ([dict(ACME, routing=r) for r in
+                         ("", "99999999", "9999999921", "99999999X", "99999999\u00b2")]
+                        + [without]):
+            with self.subTest(routing=company.get("routing")):
+                run = PaymentRun(closed_port(), closed_port(), company, "nacha").run(
+                    datetime.date(2026, 10, 2), "R1")
+                self.assertEqual(run.items, [])
+                self.assertEqual(len(run.problems), 1, run.problems)
+                self.assertIn("company routing number", run.problems[0])
+                self.assertIn("so no open item was selected", run.problems[0])
 
     def test_every_printable_character_is_one_a_record_holds(self):
         printable = "".join(chr(code) for code in range(0x20, 0x7F))
