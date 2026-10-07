@@ -22,6 +22,7 @@ released mocks, kept in one place so that there is one copy of each.
 | `mockacme.remittance` | SAP's payment advice (a PEXR2002 it generates) out as an 820, and what the supplier made of it | SAP, supplier |
 | `mockacme.procure_to_pay` | one purchase from the order to the cleared payment, and the supplier told what it was for; a backorder as a second payable on the same order; an invoice ahead of its ship notice, not paid until the notice comes | all three |
 | `mockacme.e_invoice` | the supplier's invoice as a UBL e-invoice, matched and posted as an 810 is, and answered with Peppol Invoice Responses: received, accepted or rejected with the reason, and paid when SAP has cleared it | SAP, supplier (e-invoicing and EDI) |
+| `mockacme.order_to_cash` | SAP as the seller: a billing document out as a UBL e-invoice through our own access point, what the customer says of it, and paid when the customer's money is on a statement and SAP has cleared the receivable | SAP, customer (e-invoicing), bank |
 
 `mockacme.bank_messages` is what the two payment modules share: the call to the
 bank and the reading of its ISO 20022 answers.
@@ -187,11 +188,29 @@ places nowhere, which includes one that was never this run's: the run cannot
 tell. mock-bank always gives the reference back, so the first case takes a
 statement from somewhere else.
 
-Money arriving is posted to SAP and nothing comes of it. Each credit on the
-statement says whether it is a payment coming back or money arriving, so SAP
-no longer takes a receipt for a return, but posting it against a receivable is
-not built ([mock-sap#65](https://github.com/rseufert/mock-sap/issues/65)). SAP
-answers the line as unprocessed, and that is on the statement's record.
+Money arriving clears the receivable it quotes, where SAP can tell which
+that is, and where it cannot the money is applied to nothing and
+`order_to_cash` says so with SAP's reason
+([#42](https://github.com/rseufert/mock-acme/issues/42)). What that leaves:
+
+- A customer who pays short, or over, is applied to nothing. mock-sap posts
+  no part payment and no residual item, and nothing here decides whether a
+  shortfall is a deduction or an instalment.
+- A payer who writes the invoice number in the `EndToEndId` and something
+  else in the remittance information is not applied. The remittance
+  information is believed over the `EndToEndId`, which is the payer's own
+  number for the payment; only a payer who writes no remittance information
+  at all has the `EndToEndId` read.
+- A BAI2 statement carries no note to payee, so on an account that banks in
+  NACHA only a structured reference or the `EndToEndId` can name the invoice.
+- `order_to_cash` writes an invoice at one rate of tax, in the standard
+  category, for one sales order. A billing document with no tax, or over
+  several orders, is not sent, and neither is a credit memo or a
+  cancellation. Nobody is reminded when an invoice is past due.
+- Who is selling, the rate of tax and where each customer takes its invoices
+  are given to `order_to_cash` and not read from SAP: mock-sap has no company
+  code master, no rate on a billing document and no e-invoicing address on a
+  business partner. A real system holds all three somewhere.
 
 ## Releasing
 

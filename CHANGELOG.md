@@ -8,12 +8,28 @@ says so where it does.
 
 ## [Unreleased]
 
-**Two things change behaviour:** `invoice_check` blocks a second invoice for
-a shipment already billed, where it posted it; and a payment run reports a
-debit SAP could not place. The tests need mock-sap 0.21.0.
+Order to cash, with SAP as the seller. **Three things change behaviour:**
+`invoice_check` blocks a second invoice for a shipment already billed, where
+it posted it; a payment run reports a debit SAP could not place; and money
+arriving is told to SAP by what the payer said it pays, not by the payer's
+own number for the payment. The tests need mock-sap 0.21.0.
 
 ### Added
 
+- **`order_to_cash`: a billing document sent as an e-invoice, and followed to
+  paid** ([#42]). SAP as the seller, which nothing here had. `send` writes a
+  Peppol BIS Billing 3.0 invoice from a billing document, its sales order,
+  the customer's business partner and the receivable's due date, and hands it
+  to our own access point, mock-einvoice's supplier side, which holds it to
+  its rules and delivers it. `follow` says what the customer last said of
+  each and whether SAP has cleared the receivable, apart, and where the two
+  disagree: a customer who says paid has not paid until a statement says so.
+  `bank` posts the statements and names money that arrived and that SAP
+  applied to nothing. Nothing is kept: what was sent is asked of the access
+  point, and what is paid, of SAP. Who is selling, the rate of tax and which
+  customers take e-invoices are given to it, because mock-sap holds none of
+  them; a billing document whose tax is not that rate of its net is not
+  written. What it does not do is in the module and the README.
 - **A table of the mocks each release was tested against** ([#43]), in the
   README under "Tested against", one row for each release back to 0.1.0. The
   floors a downstream project needs were in prose, a changelog entry here and
@@ -35,6 +51,21 @@ debit SAP could not place. The tests need mock-sap 0.21.0.
   record may carry none; it is read as an empty reference and goes to SAP as
   one. mock-sap then clears nothing, even with one open item of that amount
   claimed by the run: it does not match on the amount alone.
+
+### Changed
+
+- **Money arriving is told to SAP by what the payer said it pays** ([#42]).
+  The reference on every FINSTA01 line was the entry's `EndToEndId`. That is
+  right for a payment of ours, which carries the number this package wrote;
+  on money arriving it is the payer's own number, and the invoice is named in
+  the remittance information. A receipt now carries its structured creditor
+  reference where it has one; its note to payee alone (`E1IDT01`) where it
+  has a note and no structured reference, so that SAP searches the note; and
+  its `EndToEndId` only where the payer wrote no remittance information at
+  all. **Changes behaviour:** a credit with a note used to reach SAP quoting
+  its `EndToEndId` and now reaches it quoting the note. Payments of ours,
+  going out or coming back, are written as before. `bank_messages.entries`
+  returns `reference` and `note`; a statement's record keeps its `lines`.
 
 ### Fixed
 
@@ -390,6 +421,7 @@ These differ from the last copies the mocks carried.
 [#34]: https://github.com/rseufert/mock-acme/issues/34
 [#37]: https://github.com/rseufert/mock-acme/issues/37
 [#41]: https://github.com/rseufert/mock-acme/issues/41
+[#42]: https://github.com/rseufert/mock-acme/issues/42
 [#43]: https://github.com/rseufert/mock-acme/issues/43
 [#44]: https://github.com/rseufert/mock-acme/issues/44
 [#46]: https://github.com/rseufert/mock-acme/issues/46
