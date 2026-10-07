@@ -97,15 +97,18 @@ items and writing the claim are two requests, and nothing makes them one: two
 runs that both read before either writes both pay. One run after another, on
 any machine, is safe; two at once are not.
 
-An e-invoice's answers are one process's memory. `e_invoice` remembers which
-invoices it has collected and what it has said of each, as `invoice_check`
-remembers what it posted. Started again, it collects everything the supplier
-has sent once more. SAP is asked and says it holds each one, so nothing is
-posted twice; but each is acknowledged again and then rejected as a duplicate.
-A supplier that keeps Peppol's order of statuses ignores both, since only
-"paid" may follow "accepted", and mock-einvoice does. One that does not would
-see an accepted invoice rejected. And "paid" is never said for an invoice
-posted before the restart, however it is cleared.
+An e-invoice posted by a process that stopped before saying so is never
+answered. `e_invoice` keeps what it has collected and said in memory, and a
+new process asks the supplier's side what each invoice was last told, so
+nothing is acknowledged, accepted or rejected twice, and an invoice accepted
+before a restart is still told "paid". But when the last thing said was
+"received" and SAP already holds the invoice, there are two ways that came
+about: the earlier process posted it and stopped before it said "accepted", or
+the invoice is a copy of one that reached SAP another way. SAP holds a number
+and a supplier, not who posted it. So the invoice is reported as blocked with
+both reasons, the supplier is told nothing, and "paid" is never said for it. A
+person has to look. An XRechnung invoice, which is told nothing, is reported
+as blocked for being in SAP after every restart, for the same reason.
 
 A second invoice for a shipment already billed is posted, if the order has
 quantity left. `invoice_check` matches an invoice to the ship notice it names

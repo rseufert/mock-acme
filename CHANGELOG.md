@@ -34,6 +34,23 @@ says so where it does.
   once, as before, and one that names no shipment is matched as before.
   `read_810` returns `shipment`; `shipment_number` reads an 856's.
 
+### Fixed
+
+- **`e_invoice` started again takes each invoice up where it was** ([#37]). A
+  new process collected everything the supplier had sent once more,
+  acknowledged each again and rejected it as a duplicate, because SAP held
+  it; and it never said "paid" for an invoice posted before the restart. It
+  now asks the supplier's side what each invoice was last told. One that was
+  accepted, rejected or queried is not matched again; one only acknowledged is
+  matched and not acknowledged twice; and one that was accepted is told paid
+  when SAP has cleared it, its payable found in SAP by the invoice's number
+  and the order's supplier. Responses are numbered on from those already sent.
+  **Changes behaviour:** a copy of an invoice that arrives after a restart is
+  now left and reported, as one that arrives without a restart is, where it
+  was rejected with `RE`. One case is left to a person and told nothing: an
+  invoice acknowledged before a restart that SAP already holds, since SAP
+  does not say whether the earlier process posted it.
+
 ## [0.4.0] - 2026-10-07
 
 One addition: a supplier's e-invoice instead of an 810. Nothing that was there
@@ -304,3 +321,4 @@ These differ from the last copies the mocks carried.
 [#30]: https://github.com/rseufert/mock-acme/issues/30
 [#33]: https://github.com/rseufert/mock-acme/issues/33
 [#34]: https://github.com/rseufert/mock-acme/issues/34
+[#37]: https://github.com/rseufert/mock-acme/issues/37

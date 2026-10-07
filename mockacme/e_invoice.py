@@ -41,8 +41,18 @@ has no response message, so there is nothing to say it with.
 **What it does not do.** Credit notes are left where they are. A part payment
 is not told as one (`PD` with the reason `PPD`): a payable is cleared or it is
 not. Allowances and charges are not read, so an invoice with one is rejected
-because it does not add up, as an 810 with a `SAC` is blocked. What it has
-collected and said is one process's memory, as `InvoiceCheck.posted` is.
+because it does not add up, as an 810 with a `SAC` is blocked.
+
+**Started again, it asks.** What it has collected and said is one process's
+memory, so a new process asks the supplier's side what each invoice was last
+told, and takes it up from there: one that was accepted, rejected or queried
+is not matched again, and one that was accepted is told paid when SAP has
+cleared it, its payable found in SAP by the invoice's number and the order's
+supplier. The supplier's side stands in here for a record of its own
+responses that a buyer's access point keeps. One case is left to a person: an
+invoice that was acknowledged and nothing more, which SAP holds. The earlier
+process may have posted it and stopped before saying so, or it may be a copy
+of one that came another way, and SAP does not say which.
 
 The supplier is mock-einvoice (https://github.com/rseufert/mock-einvoice),
 which holds every response it is given to Peppol's 82 published rules and
@@ -74,6 +84,9 @@ RESPONSE = "urn:fdc:peppol.eu:poacc:trns:invoice_response:3"
 ANSWERING = "urn:fdc:peppol.eu:poacc:bis:invoice_response:3"
 BILLING_WITH_RESPONSE = "urn:peppol:bis:billing_with_response"
 ITEMS = "/sap/opu/odata/sap/API_OPLACCTGDOCITEMCUBE_SRV/A_OperationalAcctgDocItemCube"
+SUPPLIER_INVOICES = "/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV/A_SupplierInvoice"
+# How a check that asks SAP says SAP holds an invoice already.
+HELD_BY_SAP = "is already in SAP"
 
 # Why an invoice was not accepted, read off the reason `InvoiceCheck` gave:
 # (a phrase of the reason, Peppol's reason code, the status). The first that
@@ -267,9 +280,9 @@ class EInvoices:
         self.now = now or (lambda: datetime.datetime.now(datetime.timezone.utc))
         self.taken = set()          # the supplier's ids of what was collected
         # invoice number -> what is known of it: the invoice as read, whether
-        # it can be answered, what has been said, and the payable it became.
+        # it can be answered, what has been said and how many responses that
+        # took, and the payable it became.
         self.known: Dict[str, dict] = {}
-        self.responses = 0
 
     # -- the supplier -------------------------------------------------------------------
 
@@ -303,10 +316,20 @@ class EInvoices:
                     "invoice %s was collected before; this copy was not checked"
                     % invoice["number"]]))
                 continue
+            # What the supplier holds as said of it already: nothing, unless
+            # an earlier process said it. Only what was heeded counts as said.
+            heard = (json.loads(self.ask("GET", "/_mock/sent/%s" % sent["id"]))["responses"]
+                     if sent["status"] else [])
+            said = [one["code"] for one in heard if not one["ignored"]]
             self.known[invoice["number"]] = {
                 "invoice": invoice, "answerable": sent["specification"] == "peppol",
-                "said": [], "accounting_document": "", "waiting": True}
-            self.say(invoice["number"], "AB")
+                "said": said, "responses": len(heard), "resumed": bool(said),
+                "accounting_document": "", "paid": False,
+                # Only an invoice nothing was decided of is matched: one that
+                # was accepted, rejected or queried before stays as it was.
+                "waiting": said in ([], ["AB"])}
+            if not said:
+                self.say(invoice["number"], "AB")
         return left
 
     def say(self, number: str, code: str, problems: Tuple[str, ...] = ()) -> None:
@@ -315,9 +338,10 @@ class EInvoices:
         known = self.known[number]
         if not known["answerable"] or self.final(known["said"]):
             return
-        self.responses += 1
         self.ask("POST", "/responses", response_xml(
-            known["invoice"], "%s-%d" % (number, self.responses), code, self.now(), problems))
+            known["invoice"], "%s-%d" % (number, known["responses"] + 1), code, self.now(),
+            problems))
+        known["responses"] += 1
         known["said"].append(code)
 
     @staticmethod
@@ -365,6 +389,16 @@ class EInvoices:
             known["accounting_document"] = result.get("accounting_document", "")
             number = known["invoice"]["number"]
             told = tuple(p for p in result["problems"] if reason_for(p))
+            if (known["resumed"] and result["status"] == "blocked"
+                    and any(HELD_BY_SAP in p for p in result["problems"])):
+                # Acknowledged by an earlier process, and SAP holds it. That
+                # process may have posted it and stopped before saying so, or
+                # it may be a copy of one that came another way; nothing here
+                # can tell which, and one is an invoice to be paid.
+                result["problems"].append(
+                    "invoice %s was acknowledged before this process started, which may be "
+                    "what posted it; the supplier was told nothing" % number)
+                told = ()
             if result["status"] == "posted":
                 self.say(number, "AP")
             elif result["status"] == "blocked" and told:
@@ -385,11 +419,28 @@ class EInvoices:
         rows = self.sap.request("GET", "%s?%s" % (ITEMS, query))["d"]["results"]
         return bool(rows) and all(row["ClearingAccountingDocument"] for row in rows)
 
+    def payable(self, known: dict) -> str:
+        """The accounting document of an invoice an earlier process had
+        accepted, asked of SAP: the one supplier invoice with its number from
+        the supplier on its order. "" where SAP holds none, or more than one."""
+        invoice = known["invoice"]
+        supplier = self.sap.purchase_order(invoice["po"])["Supplier"]
+        query = urllib.parse.urlencode({"$filter": (
+            "SupplierInvoiceIDByInvcgParty eq '%s' and InvoicingParty eq '%s'"
+            % (invoice["number"].replace("'", "''"), supplier.replace("'", "''"))),
+            "$format": "json"})
+        rows = self.sap.request("GET", "%s?%s" % (SUPPLIER_INVOICES, query))["d"]["results"]
+        return rows[0]["AccountingDocument"] if len(rows) == 1 else ""
+
     def paid(self) -> List[dict]:
-        """Say paid for every invoice posted here that SAP has cleared since."""
+        """Say paid for every invoice accepted that SAP has cleared since."""
         told = []
         for number, known in self.known.items():
-            if not known["accounting_document"] or known.get("paid"):
+            if known["paid"]:
+                continue
+            if not known["accounting_document"] and known["said"][-1:] == ["AP"]:
+                known["accounting_document"] = self.payable(known)
+            if not known["accounting_document"]:
                 continue
             if self.cleared(known["accounting_document"]):
                 known["paid"] = True
