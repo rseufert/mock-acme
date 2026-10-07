@@ -8,8 +8,9 @@ says so where it does.
 
 ## [Unreleased]
 
-A payment run now reports a debit SAP could not place. The tests need mock-sap
-0.21.0.
+**Two things change behaviour:** `invoice_check` blocks a second invoice for
+a shipment already billed, where it posted it; and a payment run reports a
+debit SAP could not place. The tests need mock-sap 0.21.0.
 
 ### Added
 
@@ -37,6 +38,20 @@ A payment run now reports a debit SAP could not place. The tests need mock-sap
 
 ### Fixed
 
+- **`invoice_check`: a shipment billed twice under two invoice numbers is
+  posted once** ([#41]). An invoice that names its shipment was compared with
+  that shipment's notice and with what the order had been billed, but not
+  with what the shipment had. So on an order whose balance had not shipped, a
+  second invoice for the first delivery, under a number of its own and for no
+  more than the balance, passed every check: the supplier was owed for goods
+  it had not sent, and its real invoice for the balance was the one blocked.
+  Each invoice is now counted against the shipment it names. **Changes
+  behaviour:** the second is `blocked`, with the shipment and what was
+  already billed against it in the reason; two invoices that share a
+  shipment between them are both posted, as before. The count is one
+  process's memory, in `DurableInvoiceCheck` too, because SAP's supplier
+  invoice has nowhere to hold the shipment; the README says what a restart
+  does to it. An invoice that names no shipment is matched as before.
 - **`payment_run`: a debit SAP clears nothing for is one of the run's
   problems** ([#46]). SAP answers a statement line it can do nothing with
   under `UNPROCESSED`, and the run kept that on the statement's record and
@@ -374,6 +389,7 @@ These differ from the last copies the mocks carried.
 [#33]: https://github.com/rseufert/mock-acme/issues/33
 [#34]: https://github.com/rseufert/mock-acme/issues/34
 [#37]: https://github.com/rseufert/mock-acme/issues/37
+[#41]: https://github.com/rseufert/mock-acme/issues/41
 [#43]: https://github.com/rseufert/mock-acme/issues/43
 [#44]: https://github.com/rseufert/mock-acme/issues/44
 [#46]: https://github.com/rseufert/mock-acme/issues/46

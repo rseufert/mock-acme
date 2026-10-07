@@ -8,6 +8,7 @@ is posted into SAP (as an inbound INVOIC IDoc) only if
       earlier invoices for the same order have already billed,
     - it bills no more than the supplier's 856 ship notice said was shipped,
       and where the invoice names its shipment, that shipment's notice,
+      counting what earlier invoices have already billed against that shipment,
     - its total adds up, tax included, and
     - it has not been posted before.
 
@@ -35,6 +36,16 @@ nobody has said were sent. Anything else wrong with it blocks it at once: a
 wrong price does not get better when the goods arrive. An invoice that names
 no shipment is matched against the order's latest notice, as before, and is
 blocked if it bills more.
+
+**A shipment is billed once, under however many numbers.** An invoice that
+names its shipment is counted against it, so a second invoice for a shipment
+already billed in full is blocked whatever number it carries, and two that
+share a shipment between them are both posted. Without that the second one
+passes every other check while the order still has quantity left: it bills
+less than the notice says was sent, and no more than was ordered. The count
+is this process's memory, here and in `DurableInvoiceCheck` alike: SAP's
+supplier invoice has nowhere to say which shipment it was for. An invoice
+that names no shipment cannot be counted this way, and is not.
 
 **No over-delivery tolerance is read.** A real purchase order item can allow
 some, as a percentage. mock-sap's item carries no such field, so none is
@@ -281,6 +292,9 @@ class InvoiceCheck:
         self.notices = {}
         self.posted = set()     # invoice numbers already in SAP
         self.billed = {}        # po_number -> {item: quantity}, from what was posted
+        # (po_number, shipment number) -> {item: quantity}, from what was
+        # posted for an invoice that named its shipment.
+        self.billed_for = {}
         # 810s collected and not yet dealt with: (invoice, whether an earlier
         # run posted its IDoc and SAP never answered).
         self.pending = []
@@ -293,6 +307,14 @@ class InvoiceCheck:
         `procure_to_pay.DurableInvoiceCheck` does.
         """
         return self.billed.get(po_number, {}).get(item, Decimal(0))
+
+    def already_billed_for(self, po_number, shipment, item):
+        """What earlier invoices have billed for this item of this shipment.
+
+        From this object's own memory, and there is nowhere else to ask:
+        mock-sap's supplier invoice does not hold the shipment it was for.
+        """
+        return self.billed_for.get((po_number, shipment), {}).get(item, Decimal(0))
 
     def after_no_answer(self, invoice, po):
         """Why an invoice whose IDoc SAP never answered must not be sent again.
@@ -352,8 +374,17 @@ class InvoiceCheck:
                 found.append("item %s bills %s%s, ordered %s" % (
                     item, qty, ", with %s already billed" % x12_quantity(before)
                     if before else "", x12_quantity(asked_for)))
-            if shipped is not None and qty > shipped.get(item, 0):
-                found.append("item %s bills %s, shipped %s" % (item, qty, shipped.get(item, 0)))
+            if shipped is not None:
+                # Against the shipment, and not only against its notice: a
+                # second invoice for a shipment already billed is for less
+                # than was sent, and for goods already billed (#41).
+                named = invoice.get("shipment") or ""
+                earlier = self.already_billed_for(invoice["po"], named, item)
+                if earlier + qty > shipped.get(item, 0):
+                    found.append("item %s bills %s, shipped %s%s" % (
+                        item, qty, shipped.get(item, 0),
+                        " in shipment %s, with %s already billed against it"
+                        % (named, x12_quantity(earlier)) if earlier else ""))
         tax = invoice.get("tax") or Decimal("0.00")
         if total + tax != invoice["total"]:
             # Said with the tax, or without it when there is none, so that the
@@ -468,6 +499,12 @@ class InvoiceCheck:
             billed = self.billed.setdefault(invoice["po"], {})
             for item, (qty, _) in invoice["lines"].items():
                 billed[item] = billed.get(item, Decimal(0)) + qty
+            if invoice.get("shipment"):
+                # Against its shipment as well, where it names one.
+                billed_for = self.billed_for.setdefault(
+                    (invoice["po"], invoice["shipment"]), {})
+                for item, (qty, _) in invoice["lines"].items():
+                    billed_for[item] = billed_for.get(item, Decimal(0)) + qty
             result.update(status="posted", idoc=receipt["DOCNUM"])
             # What posting it actually created. An INVOIC that posts
             # leaves a supplier invoice and money owed; saying so here
