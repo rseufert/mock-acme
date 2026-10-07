@@ -8,8 +8,8 @@ says so where it does.
 
 ## [Unreleased]
 
-Tests and words only; nothing in the package behaves differently. The tests
-need mock-sap 0.21.0.
+A payment run now reports a debit SAP could not place. The tests need mock-sap
+0.21.0.
 
 ### Added
 
@@ -23,11 +23,18 @@ need mock-sap 0.21.0.
 - **A test for a statement line with no reference** ([#44]). A BAI2 `16`
   record may carry none; it is read as an empty reference and goes to SAP as
   one. mock-sap then clears nothing, even with one open item of that amount
-  claimed by the run: it does not match on the amount alone. The README says
-  so under "Known to be wrong", because the run reports it only on the
-  statement's record.
+  claimed by the run: it does not match on the amount alone.
 
 ### Fixed
+
+- **`payment_run`: a debit SAP clears nothing for is one of the run's
+  problems** ([#46]). SAP answers a statement line it can do nothing with
+  under `UNPROCESSED`, and the run kept that on the statement's record and
+  said nothing. For a payment of the run that is money gone, an item still
+  open and still claimed, and a result with no problem in it. The run now
+  says which statement and line, the amount, what the line quoted, SAP's
+  reason, and its own accepted payments of that amount, none of which it
+  picks. A credit left unprocessed is not reported, as before.
 
 - **The comment on why a debit carries no `LINACTION`** ([#44]). It said SAP
   does not look. From mock-sap 0.21.0 it does: a debit carrying `RET` is money
@@ -358,3 +365,4 @@ These differ from the last copies the mocks carried.
 [#34]: https://github.com/rseufert/mock-acme/issues/34
 [#37]: https://github.com/rseufert/mock-acme/issues/37
 [#44]: https://github.com/rseufert/mock-acme/issues/44
+[#46]: https://github.com/rseufert/mock-acme/issues/46
