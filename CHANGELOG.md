@@ -8,6 +8,16 @@ says so where it does.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.0] - 2026-10-07
+
+One order that is not one delivery or one moment, and an e-invoice across a
+restart. **Two things change behaviour:** `invoice_check` holds an invoice
+whose own ship notice has not arrived, where it blocked and dropped it; and
+`e_invoice` started again takes each invoice up where it was, where it
+answered every one again. The tests need mock-edi 0.9.0.
+
 ### Added
 
 - **`procure_to_pay`: a backorder, and an invoice ahead of its ship notice**
@@ -299,6 +309,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.5.0]: https://github.com/rseufert/mock-acme/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rseufert/mock-acme/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/rseufert/mock-acme/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/rseufert/mock-acme/compare/v0.3.0...v0.3.1
