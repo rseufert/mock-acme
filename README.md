@@ -16,11 +16,11 @@ released mocks, kept in one place so that there is one copy of each.
 | Module | Carries | Between |
 | --- | --- | --- |
 | `mockacme.po_bridge` | a purchase order out as an 850, the 855 back as an ORDRSP IDoc | SAP, supplier |
-| `mockacme.invoice_check` | the supplier's 856 and 810, matched to the order, posted as an INVOIC IDoc or blocked | SAP, supplier |
+| `mockacme.invoice_check` | the supplier's 856 and 810, matched to the order, posted as an INVOIC IDoc or blocked, or held while the invoice's own ship notice has not arrived | SAP, supplier |
 | `mockacme.pay_invoices` | a supplier's 810s, paid as a pain.001 and followed to the statement | supplier, bank |
 | `mockacme.payment_run` | SAP's open items, paid as a pain.001 or a NACHA file, cleared by posting the statement as a FINSTA01 | SAP, bank |
 | `mockacme.remittance` | SAP's payment advice (a PEXR2002 it generates) out as an 820, and what the supplier made of it | SAP, supplier |
-| `mockacme.procure_to_pay` | one purchase from the order to the cleared payment, and the supplier told what it was for | all three |
+| `mockacme.procure_to_pay` | one purchase from the order to the cleared payment, and the supplier told what it was for; a backorder as a second payable on the same order; an invoice ahead of its ship notice, not paid until the notice comes | all three |
 | `mockacme.e_invoice` | the supplier's invoice as a UBL e-invoice, matched and posted as an 810 is, and answered with Peppol Invoice Responses: received, accepted or rejected with the reason, and paid when SAP has cleared it | SAP, supplier (e-invoicing and EDI) |
 
 `mockacme.bank_messages` is what the two payment modules share: the call to the
@@ -110,8 +110,24 @@ both reasons, the supplier is told nothing, and "paid" is never said for it. A
 person has to look. An XRechnung invoice, which is told nothing, is reported
 as blocked for being in SAP after every restart, for the same reason.
 
+A second invoice for a shipment already billed is posted, if the order has
+quantity left. `invoice_check` matches an invoice to the ship notice it names
+and counts what has been billed against the order, but not against each
+shipment. So a supplier that bills one delivery twice under two invoice
+numbers, on an order whose balance has not shipped yet, is paid for goods it
+has not sent, and its real invoice for the balance is then the one blocked.
+The same invoice number twice is caught; this is not. mock-edi does not do it,
+so the test that states it writes the second invoice itself.
+
+A held invoice waits for ever if its ship notice never comes, and is reported
+as held on every run. What is held, like what has shipped, is one process's
+memory: a restart loses it, and the invoice with it, since collecting from the
+mailbox took it out.
+
 It has other edges:
 
+- An e-invoice names no shipment, so `e_invoice` never holds one: an
+  e-invoice for more than the order's latest ship notice is rejected.
 - `e_invoice` does not read allowances or charges, so an e-invoice with one is
   rejected because it does not add up. It does not read a credit note at all.
   A part payment is not told as one: a payable is cleared or it is not.

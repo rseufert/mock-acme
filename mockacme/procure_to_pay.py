@@ -22,7 +22,18 @@ The scenario worth reading first is the same invoice arriving twice. Two things
 appear to catch it and neither does - see `DurableInvoiceCheck` below, and
 `test_2_without_asking_sap_the_duplicate_is_paid_too`, which resends the despatch
 advice alongside the invoice precisely because resending the invoice alone is
-blocked for the wrong reason.
+stopped for the wrong reason.
+
+Two more are about one order that is not one delivery or one moment. A supplier
+that has less in stock than was ordered ships what it has and the rest later:
+two ship notices, two invoices and two payables against one purchase order,
+neither a copy of the other, each paid once
+(`test_a_backorder_is_a_second_payable_and_each_is_paid_once`). And an invoice
+that arrives before its ship notice is held: a payment run that fires meanwhile
+pays nothing for it, and the run after the notice arrives pays it
+(`test_an_invoice_ahead_of_its_ship_notice_is_not_paid_until_the_notice_comes`).
+The mistake that scenario is there for is posting unmatched so as not to miss
+the run, which pays for goods nobody has said were sent.
 
 This module composes rather than reimplements. The three-way match is
 `invoice_check.InvoiceCheck`, a checked copy of mock-sap's example; selection,
@@ -84,10 +95,10 @@ class DurableInvoiceCheck(invoice_check.InvoiceCheck):
     of what *else* the restart lost, which is why they are worth spelling out:
 
     * **Upstream**, a fresh `InvoiceCheck` has forgotten its ship notices as well
-      as what it posted, so a resent invoice arriving on its own is blocked for
-      billing more than was shipped - `item 00010 bills 100, shipped 0`. That is
-      not the duplicate being caught; it is a second thing being missing. Resend
-      the despatch advice with the invoice, which is what a partner replaying a
+      as what it posted, so a resent invoice arriving on its own is held for a
+      ship notice that came and went before the restart. That is not the
+      duplicate being caught; it is a second thing being missing. Resend the
+      despatch advice with the invoice, which is what a partner replaying a
       batch does, and the invoice posts again.
     * **Downstream**, in *one* run, `PaymentRun.select` sorts by reference and
       marks the second item with a reference it has already seen as `skipped` -
