@@ -995,7 +995,8 @@ class TwoSuppliersOneNumberOneAmount(StatementCase):
         """The other half: without a claim SAP cannot tell, and does not pick."""
         globex = self.sap.invoice(GLOBEX, "INV-1", "1190.00")
         umbrella = self.sap.invoice(UMBRELLA, "INV-1", "1190.00")
-        record = self.payments.post_statement(Run(self.monday, "R1", []), {
+        run = Run(self.monday, "R1", [])
+        record = self.payments.post_statement(run, {
             "number": "900", "day": self.monday.isoformat(), "currency": CURRENCY,
             "opening": Decimal("5000.00"), "closing": Decimal("3810.00"),
             "lines": [{"end_to_end_id": "INV-1", "amount": Decimal("1190.00"),
@@ -1004,6 +1005,13 @@ class TwoSuppliersOneNumberOneAmount(StatementCase):
         [refused] = record["unprocessed"]
         for posted in (globex, umbrella):
             self.assertIn(posted["ACCOUNTINGDOCUMENT"], refused["REASON"])
+        # Money left and SAP placed it nowhere: the run says so, in SAP's words
+        # (#46). It is nobody's payment in this run, so no item is named.
+        [problem] = run.problems
+        self.assertTrue(problem.startswith(
+            "statement 900 for %s, line 1: a debit of 1190.00 quoting INV-1 "
+            "cleared nothing in SAP (" % self.monday.isoformat()), problem)
+        self.assertTrue(problem.endswith("(%s)" % refused["REASON"]), problem)
 
 
 class AStatementLineWithNoReference(StatementCase):
@@ -1019,8 +1027,9 @@ class AStatementLineWithNoReference(StatementCase):
     of exactly that amount, and with this run's claim on it. #44 was raised
     expecting the claim to decide here; it does not, and this holds that down.
 
-    So the payment is made and the item stays open and claimed. The run says
-    so only on the statement's record, which is thin: see the README.
+    So the payment is made and the item stays open and claimed, and the run
+    says so as a problem (#46): which line, SAP's reason, and which of its own
+    payments are for that amount.
 
     The statement is written here, not fetched: mock-bank always gives the
     reference back.
@@ -1042,6 +1051,63 @@ class AStatementLineWithNoReference(StatementCase):
         self.assertEqual([i.status for i in run.items], ["accepted"])
         self.assertEqual(self.clearing("GLX-4711"), "")
         self.assertEqual(self.cube_item("GLX-4711")["PaymentRunID"], "R1")
+        self.assertEqual(run.problems, [
+            "statement 900 for %s, line 1: a debit of 1190.00 quoting no reference "
+            "cleared nothing in SAP (no open item quotes this reference); this "
+            "run's accepted payment of that amount: GLX-4711" % self.monday.isoformat()])
+
+
+class WhatSapCouldNotPlace(unittest.TestCase):
+    """#46: which of SAP's `UNPROCESSED` rows the run reports, and how.
+
+    SAP's answer is handed over at `post_idoc`, so no mock has to be running.
+    """
+
+    def post(self, unprocessed, items=()):
+        run = Run(datetime.date(2026, 10, 5), "R1", list(items))
+        statement = {"number": "7", "day": "2026-10-05", "currency": CURRENCY,
+                     "opening": Decimal("100.00"), "closing": Decimal("75.00"),
+                     "lines": [{"end_to_end_id": "OUT-1", "amount": "10.00",
+                                "side": "DBIT", "returned_for": "", "returned": False},
+                               {"end_to_end_id": "IN-1", "amount": "5.00",
+                                "side": "CRDT", "returned_for": "", "returned": False},
+                               {"end_to_end_id": "", "amount": "20.00",
+                                "side": "DBIT", "returned_for": "", "returned": False}]}
+        runner = PaymentRun(SAP, BANK, ACME, MODE)
+        with unittest.mock.patch.object(runner.session, "post_idoc",
+                                        return_value={"UNPROCESSED": unprocessed}):
+            runner.post_statement(run, statement)
+        return run
+
+    def item(self, reference, amount, status="accepted"):
+        return Item(document="1000/2026/01%s" % reference[-1] * 8, supplier=GLOBEX,
+                    reference=reference, amount=amount, status=status)
+
+    def test_a_debit_is_a_problem_and_a_credit_is_not(self):
+        run = self.post([{"LINE": "000001", "REASON": "because"},
+                         {"LINE": "000002", "REASON": "money arriving"}])
+        self.assertEqual(run.problems, [
+            "statement 7 for 2026-10-05, line 1: a debit of 10.00 quoting OUT-1 "
+            "cleared nothing in SAP (because)"])
+
+    def test_every_accepted_payment_of_that_amount_is_named_and_none_picked(self):
+        items = [self.item("A-1", "20.00"), self.item("A-2", "20.00"),
+                 self.item("A-3", "20.00", status="cleared"), self.item("A-4", "10.00")]
+        run = self.post([{"LINE": 3}], items)
+        self.assertEqual(run.problems, [
+            "statement 7 for 2026-10-05, line 3: a debit of 20.00 quoting no "
+            "reference cleared nothing in SAP (no reason given); this run's "
+            "accepted payments of that amount: A-1, A-2"])
+        self.assertEqual([i.status for i in items],
+                         ["accepted", "accepted", "cleared", "accepted"])
+
+    def test_a_row_that_names_no_line_of_the_statement_is_left_on_the_record(self):
+        # The fourth line is the totals this run wrote itself; the others name
+        # nothing. None of them is a movement the run can say anything about.
+        run = self.post([{"LINE": "000004"}, {"LINE": "x"}, {"REASON": "?"},
+                         {"LINE": "000009"}, {"LINE": "000000"}])
+        self.assertEqual(run.problems, [])
+        self.assertEqual(len(run.statements[0]["unprocessed"]), 5)
 
 
 class TheRunsOwnRegister(StatementCase):

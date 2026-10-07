@@ -996,9 +996,44 @@ class PaymentRun:
                 item.reason = "%s, returned on %s; SAP reversed the clearing in %s" % (
                     why.get(item.reference) or "no reason given", day,
                     line["REVERSALDOCUMENT"])
+        self.name_the_unplaced(run, record, lines)
         if not record["adds_up"]:
             self.name_the_shortfall(run, number, day, opening + moved - closing)
         return record
+
+    def name_the_unplaced(self, run: Run, record: Dict, lines: List[Dict]):
+        """A debit SAP did nothing with, said as a problem of the run (#46).
+
+        The money left and no payable was cleared, so if it was a payment of
+        this run its item stays open and claimed, and no later run pays it:
+        somebody has to look. SAP's reason is passed on as it was given. Where
+        the run has accepted payments of exactly that amount they are named as
+        what the line may be, and none is picked, because SAP did not pick.
+
+        Not a credit: money arriving that SAP does nothing with is expected,
+        and stays on the statement's record.
+        """
+        for row in record["unprocessed"]:
+            try:
+                position = int(row.get("LINE"))
+            except (TypeError, ValueError):
+                continue
+            if not 1 <= position <= len(lines):
+                continue    # the totals line, or a row that names none of ours
+            line = lines[position - 1]
+            if line["side"] != "DBIT":
+                continue
+            amount = Decimal(str(line["amount"]))
+            same = [i.reference for i in run.paying()
+                    if i.status == "accepted" and Decimal(i.amount) == amount]
+            run.problems.append(
+                "statement %s for %s, line %d: a debit of %s quoting %s cleared "
+                "nothing in SAP (%s)%s" % (
+                    record["number"], record["date"], position, amount,
+                    line["end_to_end_id"] or "no reference",
+                    row.get("REASON") or "no reason given",
+                    "; this run's accepted payment%s of that amount: %s"
+                    % ("" if len(same) == 1 else "s", ", ".join(same)) if same else ""))
 
     def name_the_shortfall(self, run: Run, number: str, day: str, short: Decimal):
         """The accepted payment for exactly the amount a statement is short.
