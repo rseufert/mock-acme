@@ -577,37 +577,119 @@ class TestOneOrderTwoDeliveries(PurchaseCase):
 
     def test_an_invoice_for_more_than_its_own_shipment_is_blocked(self):
         self.purchase(quantity=self.ORDERED)
-        [invoice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=invoice")
-        self.assertIn("IT1*00010*4200*EA*", invoice["payload"])
+        payload = self.first_invoice()
         self.assertEqual(self.p2p.approve(), [])        # the ship notice, and no invoice
-        more = read_810(invoice["payload"].replace("IT1*00010*4200*EA*", "IT1*00010*4201*EA*"))
-        self.p2p.check.pending.append((more, False))
-        [result] = self.p2p.approve()
+        result = self.approve_one(read_810(
+            payload.replace("IT1*00010*4200*EA*", "IT1*00010*4201*EA*")))
         self.assertEqual(result["status"], "blocked")
+        # Nothing has been billed against the shipment, and the reason does
+        # not say that anything has.
         self.assertIn("item 00010 bills 4201, shipped 4200", result["problems"])
 
-    def test_a_shipment_billed_twice_under_two_numbers_is_posted_twice(self):
-        """Known to be wrong, and in the README: what is billed is counted
-        against the order, not against each shipment."""
+    def first_invoice(self):
+        """The supplier's 810 for the first delivery, taken out of the mailbox."""
+        [invoice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=invoice")
+        self.assertIn("IT1*00010*4200*EA*", invoice["payload"])
+        return invoice["payload"]
+
+    def billing(self, payload, number, quantity):
+        """That invoice under another number, for this many, and adding up."""
+        original = read_810(payload)
+        return read_810(payload
+                        .replace(original["number"], number)
+                        .replace("IT1*00010*4200*EA*", "IT1*00010*%d*EA*" % quantity)
+                        .replace("TDS*5250000", "TDS*%d" % (quantity * 1250)))
+
+    def approve_one(self, invoice):
+        self.p2p.check.pending.append((invoice, False))
+        [result] = self.p2p.approve()
+        return result
+
+    def test_a_shipment_billed_twice_under_two_numbers_is_posted_once(self):
+        """#41: the second passes every other check. It bills less than the
+        notice says was sent, and no more than the order still has open."""
         self.purchase(quantity=self.ORDERED)
-        [invoice] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=invoice&leave=true")
-        [first] = self.p2p.approve()
+        payload = self.first_invoice()
+        first = self.approve_one(read_810(payload))
+        self.assertEqual((first["status"], first["problems"]), ("posted", []))
         # The same shipment again, for the 800 that have not shipped, under a
         # number of its own.
-        again = read_810(invoice["payload"]
-                         .replace(first["invoice"], "INV-AGAIN")
-                         .replace("IT1*00010*4200*EA*", "IT1*00010*800*EA*")
-                         .replace("TDS*5250000", "TDS*1000000"))
-        self.assertEqual(again["shipment"], read_810(invoice["payload"])["shipment"])
-        self.p2p.check.pending.append((again, False))
-        [result] = self.p2p.approve()
-        self.assertEqual((result["status"], result["problems"]), ("posted", []))
-        self.assertEqual(self.owed(), [Decimal("10000.00"), Decimal("52500.00")])
-        # And the balance's own invoice, when it ships, is the one refused.
+        again = self.billing(payload, "INV-AGAIN", 800)
+        self.assertEqual(again["shipment"], read_810(payload)["shipment"])
+        result = self.approve_one(again)
+        self.assertEqual((result["status"], result["problems"]), ("blocked", [
+            "item 00010 bills 800, shipped 4200 in shipment %s, with 4200 already "
+            "billed against it" % again["shipment"]]))
+        self.assertEqual(self.owed(), [Decimal("52500.00")])
+        # And the balance's own invoice, when it ships, is posted.
         self.backorder_ships()
         [real] = self.p2p.approve()
-        self.assertEqual(real["status"], "blocked")
-        self.assertIn("with 5000 already billed, ordered 5000", real["problems"][0])
+        self.assertEqual((real["status"], real["problems"]), ("posted", []))
+        self.assertEqual(self.owed(), [Decimal("10000.00"), Decimal("52500.00")])
+
+    def test_two_invoices_that_share_a_shipment_between_them_are_both_posted(self):
+        self.purchase(quantity=self.ORDERED)
+        payload = self.first_invoice()
+        self.assertEqual(self.p2p.approve(), [])        # the ship notice, and no invoice
+        for number, quantity in (("INV-PART-1", 4000), ("INV-PART-2", 200)):
+            result = self.approve_one(self.billing(payload, number, quantity))
+            self.assertEqual((result["status"], result["problems"]), ("posted", []))
+        self.assertEqual(self.owed(), [Decimal("2500.00"), Decimal("50000.00")])
+        # The shipment is now billed in full, and one more unit is one too many.
+        over = self.approve_one(self.billing(payload, "INV-PART-3", 1))
+        self.assertEqual(over["status"], "blocked")
+        self.assertIn("with 4200 already billed against it", over["problems"][0])
+        # A blocked invoice is not counted: the same unit is refused again
+        # for the same 4200, not for 4201.
+        again = self.approve_one(self.billing(payload, "INV-PART-4", 1))
+        self.assertIn("with 4200 already billed against it", again["problems"][0])
+
+    def test_what_one_shipment_was_billed_is_not_counted_against_another(self):
+        """The balance's invoice is for 800 of a shipment of 800, whatever the
+        first shipment has been billed."""
+        self.purchase(quantity=self.ORDERED)
+        self.p2p.approve()
+        self.backorder_ships()
+        [second] = self.p2p.approve()
+        self.assertEqual((second["status"], second["problems"]), ("posted", []))
+
+    def test_invoices_that_name_no_shipment_are_not_counted_against_one(self):
+        """As it was: there is no shipment to count them against, so each is
+        compared with the order's latest notice on its own. 4000 and then 800
+        of a delivery of 4200 are both posted. In the README."""
+        self.purchase(quantity=self.ORDERED)
+        payload = self.first_invoice()
+        named = read_810(payload)["shipment"]
+        unnamed = "~".join(segment for segment in payload.split("~")
+                           if not segment.strip().startswith("REF*SI*"))
+        self.assertNotIn(named, unnamed)
+        self.assertEqual(self.p2p.approve(), [])
+        for number, quantity in (("INV-BARE-1", 4000), ("INV-BARE-2", 800)):
+            invoice = self.billing(unnamed, number, quantity)
+            self.assertEqual(invoice["shipment"], "")
+            result = self.approve_one(invoice)
+            self.assertEqual((result["status"], result["problems"]), ("posted", []))
+
+    def test_started_again_the_count_is_gone_and_the_second_invoice_is_posted(self):
+        """Known to be wrong, and in the README. What a shipment has been
+        billed is this process's memory, and SAP has nowhere to keep it. A new
+        process holds the second invoice for a ship notice it never saw, which
+        is the count being lost and not the invoice being caught: send the
+        notice again with it, as a partner replaying a batch does, and it is
+        posted."""
+        po = self.purchase(quantity=self.ORDERED)
+        payload = self.first_invoice()
+        self.approve_one(read_810(payload))
+        again = self.billing(payload, "INV-AGAIN", 800)
+
+        self.p2p = self.middleware()
+        held = self.approve_one(again)
+        self.assertEqual(held["status"], "held")
+        notice = min(row["id"] for row in control(EDI, "GET", "/_mock/outbox")
+                     if row["code"] == "856" and row["reference"] == po)
+        control(EDI, "POST", "/_mock/outbox/%d/resend" % notice)
+        [result] = self.p2p.approve()
+        self.assertEqual((result["invoice"], result["status"]), ("INV-AGAIN", "posted"))
 
     def test_the_backorders_invoice_is_not_let_through_on_the_first_delivery(self):
         """Its own ship notice is the one it waits for: the first delivery's

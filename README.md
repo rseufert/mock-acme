@@ -136,14 +136,18 @@ both reasons, the supplier is told nothing, and "paid" is never said for it. A
 person has to look. An XRechnung invoice, which is told nothing, is reported
 as blocked for being in SAP after every restart, for the same reason.
 
-A second invoice for a shipment already billed is posted, if the order has
-quantity left. `invoice_check` matches an invoice to the ship notice it names
-and counts what has been billed against the order, but not against each
-shipment. So a supplier that bills one delivery twice under two invoice
-numbers, on an order whose balance has not shipped yet, is paid for goods it
-has not sent, and its real invoice for the balance is then the one blocked.
-The same invoice number twice is caught; this is not. mock-edi does not do it,
-so the test that states it writes the second invoice itself.
+What a shipment has been billed is one process's memory. `invoice_check`
+counts each invoice against the shipment it names, so a supplier that bills
+one delivery twice under two invoice numbers has the second blocked
+([#41](https://github.com/rseufert/mock-acme/issues/41)). A restart loses the
+count, in `DurableInvoiceCheck` as well: it asks SAP what an order has been
+billed, and SAP's supplier invoice has nowhere to say which shipment it was
+for, in mock-sap and so here. A new process holds such an invoice for a ship
+notice it never saw; if the supplier sends that notice again, the invoice is
+posted. And an invoice that names no shipment is not counted against one at
+all: two of them for parts of one delivery are each compared with the order's
+latest notice on its own. mock-edi sends neither a second invoice for a
+shipment nor one that names none, so the tests write them.
 
 A held invoice waits for ever if its ship notice never comes, and is reported
 as held on every run. What is held, like what has shipped, is one process's
