@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Byte-compile every module
-        run: python -m compileall -q mockacme tests
+        run: python -m compileall -q mockacme tests tools
       # The released mocks, from PyPI: what a reader who follows the README
       # gets. `tests/__init__.py` starts them.
       - name: Install the mocks

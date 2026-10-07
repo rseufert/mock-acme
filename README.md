@@ -43,6 +43,32 @@ has an invoice on the invoice itself, which an older mock-sap refuses, so
 nothing is paid. And against an older one, a customer's payment that quotes
 the number of an invoice already paid reopens that invoice.
 
+## Tested against
+
+What each release was tested against: the mocks CI installed for the run on
+the release's own commit.
+
+| mock-acme | mock-sap | mock-edi | mock-bank | mock-einvoice |
+| --- | --- | --- | --- | --- |
+| 0.5.0 | 0.21.0 | 0.9.0 | 0.9.0 | 0.1.0 |
+| 0.4.0 | 0.21.0 | 0.9.0 | 0.9.0 | 0.1.0 |
+| 0.3.2 | 0.19.0 | 0.8.0 | 0.9.0 | not used |
+| 0.3.1 | 0.19.0 | 0.8.0 | 0.9.0 | not used |
+| 0.3.0 | 0.19.0 | 0.7.0 | 0.7.0 | not used |
+| 0.2.0 | 0.18.0 | 0.7.0 | 0.7.0 | not used |
+| 0.1.0 | 0.17.1 | 0.7.0 | 0.7.0 | not used |
+
+A row is what was run, and nothing else. It does not say an earlier or a later
+mock fails. The lowest versions the tests are known to need are the floors in
+the `test` extra in [`pyproject.toml`](pyproject.toml), and nothing runs the
+tests at those floors, so they say "not below this" and no more.
+
+Rows are not typed in. [`tools/tested_against.py`](tools/tested_against.py)
+writes one from the mocks installed where the tests have just run, and
+`publish.yml` refuses to publish a release whose row is not what its own run
+installed. The rows up to 0.5.0 are older than the tool, and were read from
+the CI logs of each release commit.
+
 ## Running the tests
 
 From a checkout:
@@ -164,14 +190,18 @@ answers the line as unprocessed, and that is on the statement's record.
 A release is the same three acts as in the mocks,
 by one person in one sitting: merge a pull request that sets `version` in
 `pyproject.toml` and `__version__` in `mockacme/__init__.py` and dates the
-section in [`CHANGELOG.md`](CHANGELOG.md); tag that commit `v<version>`; publish
+section in [`CHANGELOG.md`](CHANGELOG.md), and has the release's row under
+[Tested against](#tested-against), written by `python3 tools/tested_against.py
+--write` after the tests have passed; tag that commit `v<version>`; publish
 a GitHub Release from the tag. Publishing the Release runs
 [`publish.yml`](.github/workflows/publish.yml), which runs the tests, builds,
-refuses a tag that disagrees with the package, and uploads to PyPI through
+refuses a tag that disagrees with the package or a "Tested against" row that
+disagrees with the mocks it just tested with, and uploads to PyPI through
 Trusted Publishing. Running that workflow by hand uploads to TestPyPI instead.
 
 There is no `tools/release.py` here as there is in the mocks: the steps are done
-by hand, and CI checks only that the two places the version is written agree.
+by hand. CI checks that the two places the version is written agree, and that
+the version has a row under "Tested against".
 
 ## Where the code came from
 
