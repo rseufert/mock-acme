@@ -20,4 +20,4 @@ It is a reference, not a client library to put in front of real money:
 `payment_run` keeps its own record of what it has sent, because SAP has nowhere
 to put it, and its README says where that stops being enough. Standard library only.
 """
-__version__ = "0.3.0"
+__version__ = "0.3.1"
