@@ -8,7 +8,17 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A control character in a name no longer costs every payment in an ACH
+  file** ([#25]). In NACHA mode the run checked that a supplier's name, account
+  number and reference, and the company's name and identification, were ASCII.
+  A tab, a line feed or a DEL is ASCII and is not a character a NACHA record
+  holds: a line feed ended the record in the middle of the name and the bank
+  refused the whole file, and mock-bank's next release refuses the other two
+  as well. Each is now held to printable ASCII (0x20 to 0x7E), so the one item
+  is skipped, or the run refused if it is the company's, and the reason names
+  the character.
 
 ## [0.3.0] - 2026-10-05
 
@@ -200,3 +210,4 @@ These differ from the last copies the mocks carried.
 [#15]: https://github.com/rseufert/mock-acme/issues/15
 [#18]: https://github.com/rseufert/mock-acme/issues/18
 [#21]: https://github.com/rseufert/mock-acme/issues/21
+[#25]: https://github.com/rseufert/mock-acme/issues/25
