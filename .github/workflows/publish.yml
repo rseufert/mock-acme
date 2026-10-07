@@ -34,6 +34,15 @@ jobs:
           python -m pip install -e ".[test]"
           python -m unittest discover -s tests -t . -v
           PAYMENT_RUN_FORMAT=nacha python -m unittest -v tests.test_payment_run
+      # The README's row for this release is what those tests ran against, or
+      # nothing is published (#43). A mock released since the row was written
+      # stops it here: write the row again and release from that commit.
+      # Only for a release: a run by hand, to TestPyPI, is of whatever main
+      # holds, whose version is the last release's and whose row is that
+      # release's too.
+      - name: The "Tested against" row must be what was just tested
+        if: github.event_name == 'release'
+        run: python tools/tested_against.py --check
       - run: python -m pip install --upgrade pip build twine
       - run: python -m build
       - run: python -m twine check --strict dist/*

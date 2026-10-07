@@ -13,6 +13,16 @@ A payment run now reports a debit SAP could not place. The tests need mock-sap
 
 ### Added
 
+- **A table of the mocks each release was tested against** ([#43]), in the
+  README under "Tested against", one row for each release back to 0.1.0. The
+  floors a downstream project needs were in prose, a changelog entry here and
+  a comment there. A row is not typed in: `tools/tested_against.py --write`
+  takes it from the mocks installed where the tests have just run, a test
+  fails while the version has no row, and `publish.yml` refuses to publish a
+  release whose row is not what its own run installed. The rows up to 0.5.0
+  were read from the CI logs of each release commit. It says "tested against"
+  and makes no claim about the lowest version that works, because nothing
+  runs the tests there.
 - **Tests for where mock-sap's reading of a statement line turns on the run's
   claim** ([#44]). Two suppliers billing the same invoice number for the same
   amount both fit the bank's line. From mock-sap 0.21.0 the one a payment run
@@ -364,5 +374,6 @@ These differ from the last copies the mocks carried.
 [#33]: https://github.com/rseufert/mock-acme/issues/33
 [#34]: https://github.com/rseufert/mock-acme/issues/34
 [#37]: https://github.com/rseufert/mock-acme/issues/37
+[#43]: https://github.com/rseufert/mock-acme/issues/43
 [#44]: https://github.com/rseufert/mock-acme/issues/44
 [#46]: https://github.com/rseufert/mock-acme/issues/46
