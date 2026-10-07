@@ -8,6 +8,18 @@ says so where it does.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.1] - 2026-10-06
+
+Two fixes to the payment run paying by ACH. In both, one bad value could cost
+every payment in the file, or leave them waiting with nothing said; now the
+one item is skipped with a reason, or the run is refused before it selects
+anything. Nothing changes for a run paying by SEPA transfer.
+
+**One thing a caller may notice:** a company routing number that is not nine
+of the digits 0 to 9 now refuses the run, where the file used to go.
+
 ### Fixed
 
 - **A control character in a name no longer costs every payment in an ACH
@@ -15,8 +27,8 @@ says so where it does.
   number and reference, and the company's name and identification, were ASCII.
   A tab, a line feed or a DEL is ASCII and is not a character a NACHA record
   holds: a line feed ended the record in the middle of the name and the bank
-  refused the whole file, and mock-bank's next release refuses the other two
-  as well. Each is now held to printable ASCII (0x20 to 0x7E), so the one item
+  refused the whole file, and mock-bank 0.9.0 refuses the other two as
+  well. Each is now held to printable ASCII (0x20 to 0x7E), so the one item
   is skipped, or the run refused if it is the company's, and the reason names
   the character.
 - **A routing number that is not nine digits no longer reaches an ACH file**
@@ -205,6 +217,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.3.1]: https://github.com/rseufert/mock-acme/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rseufert/mock-acme/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/rseufert/mock-acme/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rseufert/mock-acme/releases/tag/v0.1.0
