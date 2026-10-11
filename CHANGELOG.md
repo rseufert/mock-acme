@@ -8,6 +8,10 @@ says so where it does.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.0] - 2026-10-10
+
 Order to cash, with SAP as the seller. **Three things change behaviour:**
 `invoice_check` blocks a second invoice for a shipment already billed, where
 it posted it; a payment run reports a debit SAP could not place; and money
@@ -396,6 +400,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.6.0]: https://github.com/rseufert/mock-acme/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rseufert/mock-acme/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rseufert/mock-acme/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/rseufert/mock-acme/compare/v0.3.1...v0.3.2
