@@ -28,6 +28,10 @@ def rejections_at_settlement():
     A pain.002's rejected transactions, or a NACHA return file's addenda
     with the closed account's R02.
     """
+    # Peeked, never collected. mock-bank hands over what a plain read of the
+    # mailbox lists, so without `?leave` this check would take the very
+    # rejection the code under test has to read, and every test here would
+    # fail for that alone, fix or no fix.
     status, raw = call(BANK, "GET", "/_mock/mailbox?leave")
     messages = [m for m in json.loads(raw) if m["account"] == "ACME"]
     count = sum(m["body"].count("<TxSts>RJCT</TxSts>") for m in messages
