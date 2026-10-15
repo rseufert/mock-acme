@@ -172,6 +172,20 @@ It has other edges:
 - When the bank refuses a payment and SAP cannot then be reached, the claim
   stays on the item and no run selects it. The run says so as a problem, and a
   person has to take the claim off.
+- A payment the bank accepted and then refused when it was to settle, because
+  the paying account closed in between, is read from the bank's second
+  `pain.002`, or in NACHA mode from its return file, and the item is
+  rejected and its claim taken off, as for a refusal on acceptance. In NACHA
+  mode the return file names no payment run: an entry is taken to be an
+  item's when it has the item's invoice number and amount and went to the
+  account the item is to be paid into. A return of an earlier, refused
+  payment of the same invoice to the same account would be read as the
+  current one's and take its claim off.
+- These refusals are read from the bank's mailbox and left in it, because a
+  run that took them would take them from the run they are about. mock-bank
+  answers a mailbox read by handing over what it lists, so anything else that
+  collects from ACME's mailbox first, a test's own check among them, leaves
+  nothing to read.
 - `Register`, the run's own record from before SAP could hold this, is still
   accepted and no longer needed. Passing one means two records of one fact:
   whoever posts the statements has to be given the same register, or its entry
