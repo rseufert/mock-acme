@@ -11,6 +11,9 @@ It is not a mock, and it is not a client library to put in front of real money.
 It is a reference: worked integrations, each with tests that run against the
 released mocks, kept in one place so that there is one copy of each.
 
+By [Rick Seufert](https://rickseufert.com). The [worked examples page](https://rickseufert.com/examples/)
+describes each one, and the mocks' own pages are linked from it.
+
 ## What is here
 
 | Module | Carries | Between |
