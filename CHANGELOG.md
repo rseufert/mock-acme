@@ -11,7 +11,7 @@ says so where it does.
 ### Fixed
 
 - **A payment the bank accepted and then refused when it was to settle is no
-  longer left accepted for ever** ([#ISSUE]). mock-bank 0.9.0 refuses an
+  longer left accepted for ever** ([#53]). mock-bank 0.9.0 refuses an
   accepted payment on its settlement day when the paying account has closed
   in between: a second `pain.002` rejects it with `AC04`, or a NACHA account
   gets a return file with `R02`, and no statement ever shows it.
@@ -451,4 +451,4 @@ These differ from the last copies the mocks carried.
 [#43]: https://github.com/rseufert/mock-acme/issues/43
 [#44]: https://github.com/rseufert/mock-acme/issues/44
 [#46]: https://github.com/rseufert/mock-acme/issues/46
-[#ISSUE]: https://github.com/rseufert/mock-acme/issues/ISSUE
+[#53]: https://github.com/rseufert/mock-acme/issues/53
