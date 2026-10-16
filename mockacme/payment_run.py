@@ -48,6 +48,13 @@ What it gets right that is easy to get wrong:
 - **Accepted is not paid.** An item is paid when a statement shows the debit
   and SAP clears it. A payment made after the cutoff is on the next business
   day's statement, not today's, and until then it is simply still accepted.
+- **Accepted can still be refused.** A bank can refuse a payment it accepted,
+  on the day it was to settle, when the paying account closed in between: a
+  second `pain.002`, or in NACHA mode a return file, and no statement ever
+  shows it. `reconcile` reads it and the item is `rejected` with the bank's
+  code, and its claim comes off, as for a refusal on acceptance. A later run
+  that finds such an item claimed by another run reads the same refusal and
+  takes the claim off itself, so the invoice is not skipped for ever.
 - **Paid is not final.** A payment the receiving bank sends back arrives days
   later as a credit on a statement, under the same `EndToEndId`. Posted to
   SAP, it reverses the clearing and the invoice is owed again: `returned`,
@@ -398,7 +405,7 @@ class PaymentRun:
             # like a day with nothing due.
             run.problems.append(unanswered("SAP", "no open item was selected", error))
             return run
-        self.hold_back(run)
+        self.hold_back(run, self.late_refusals(run))
         self.send(run)
         self.read_status(run)
         return run
@@ -410,7 +417,7 @@ class PaymentRun:
                     "SAP's key for a payment run holds" % (identification, RUN_ID_LENGTH))
         return self.nacha_refusal(identification) if self.nacha else ""
 
-    def hold_back(self, run: Run) -> None:
+    def hold_back(self, run: Run, late: Optional[Dict] = None) -> None:
         """Leave alone what another run has already sent to the bank (#2).
 
         SAP still lists the item as open, because nothing clears it until the
@@ -418,11 +425,35 @@ class PaymentRun:
         that holds it is not held back from its own items: sending its file
         again is how a run that got no answer finds out whether the bank has
         it, and the bank refuses a copy.
+
+        Nor from an item the bank refused after accepting it (`late`, from
+        `late_refusals`): that run's claim is taken off here, because no
+        money moved and nothing else would ever take it off.
         """
         ours = (run.identification, run.run_on.isoformat())
+        unread = (late or {}).get("unread", "")
         for item in run.items:
             if item.status != "selected":
                 continue
+            if unread and item.run_id and (item.run_id, item.run_date) != ours:
+                # Said once, and only where it matters: an item another run
+                # holds may be one the bank has since refused.
+                run.problems.append("the bank's mailbox %s, so whether the bank refused "
+                                    "any payment another run holds was not read" % unread)
+                unread = ""
+            code, words = (self.refused_later(item, late)
+                           if late and item.run_id and (item.run_id, item.run_date) != ours
+                           else ("", ""))
+            if code:
+                held_by = (item.run_id, item.run_date)
+                self.let_go(run, item)
+                if not item.run_id:
+                    if self.register:
+                        self.register.release(item.document)
+                    run.problems.append(
+                        "the bank refused %s from payment run %s of %s after it had "
+                        "accepted it (%s: %s), so that run's claim was taken off and "
+                        "this run pays it" % ((item.reference,) + held_by + (code, words)))
             if item.run_id and (item.run_id, item.run_date) != ours:
                 item.status = "skipped"
                 item.reason = ("in payment: SAP has it with payment run %s of %s, and "
@@ -734,6 +765,57 @@ class PaymentRun:
 
     # -- 3. read the pain.002, or the acknowledgement ----------------------------
 
+    def late_refusals(self, run: Run) -> Dict:
+        """What the bank has said no to after it said yes, as `refused_later`
+        reads it: a `pain.002`'s rejected payments by file and `EndToEndId`, or
+        in NACHA mode the entries of the return files.
+
+        Read and left in the mailbox (`?leave`): they are about whichever run
+        sent the payment, and a run that took them would take them from the
+        run they are about. A return file is also where a returned payment's
+        `R` code is, which `reconcile` collects.
+
+        A mailbox that does not answer is said in `"unread"`, for the caller
+        to make a problem of where it matters.
+        """
+        late: Dict = {"files": {}, "entries": [], "unread": ""}
+        kind = NACHA_RETURN if self.nacha else "pain.002"
+        status, raw = call(self.bank, "GET", "/_mock/mailbox?raw&leave&type=" + kind)
+        if status != 200:
+            late["unread"] = said(status, raw)
+            return late
+        text = raw.decode("utf-8")
+        if self.nacha:
+            late["entries"] = nacha_returned_entries(text)
+        else:
+            late["files"] = refused_transactions(text)
+        return late
+
+    def refused_later(self, item: Item, late: Dict) -> Tuple[str, str]:
+        """The bank's refusal of an item's payment: its code and the words
+        with it, or two empty strings.
+
+        In a `pain.002` the payment is named exactly: the run's file by its
+        `MsgId`, which the item's claim in SAP gives, and the payment by its
+        `EndToEndId`. A NACHA return names no file. An entry is taken to be the
+        item's when it has the item's reference and amount and went to the
+        account the item is to be paid into; a return of an earlier payment of
+        the same invoice to the same account would be read as this one's.
+        """
+        if self.nacha:
+            for entry in late["entries"]:
+                if (entry["reference"] == item.reference
+                        and entry["amount"] == Decimal(item.amount)
+                        and entry["routing"] == item.routing[:8]
+                        and entry["account"] == item.account.strip()):
+                    return entry["code"], "a return entry, for a payment that was never debited"
+            return "", ""
+        try:
+            claimed = datetime.date.fromisoformat(item.run_date)
+        except ValueError:
+            return "", ""
+        return late["files"].get((Run(claimed, item.run_id).msg_id, item.reference), ("", ""))
+
     def read_status(self, run: Run) -> None:
         """Match the bank's status reports to the run by MsgId, then EndToEndId.
 
@@ -881,6 +963,13 @@ class PaymentRun:
         mailbox that does not answer is the one problem recorded; what was
         already collected is still posted.
         """
+        # Before the return files are collected below, which takes them. A
+        # mailbox that does not answer here will not answer for a statement.
+        late = self.late_refusals(run)
+        if late["unread"]:
+            run.problems.append("the bank's mailbox %s, so no statement was read"
+                                % late["unread"])
+            return
         kinds = ((STATEMENT_KINDS + (NACHA_RETURN,)) if self.nacha
                  else STATEMENT_KINDS[:1])
         statements = []
@@ -919,6 +1008,26 @@ class PaymentRun:
         statements.sort(key=lambda s: (s["day"], int(s["number"] or 0)))
         for statement in statements:
             self.post_statement(run, statement)
+        self.refused_after_acceptance(run, late)
+
+    def refused_after_acceptance(self, run: Run, late: Dict) -> None:
+        """An item still accepted after every statement is posted, that the
+        bank has since refused: `rejected` with the bank's code, and its claim
+        off, as for a refusal on acceptance, and a problem saying when. After
+        the statements, so that a payment that did settle and came back later
+        is the statement's to say, as `returned`."""
+        for item in run.paying():
+            if item.status != "accepted":
+                continue
+            code, words = self.refused_later(item, late)
+            if not code:
+                continue
+            item.status, item.reason = "rejected", code
+            run.problems.append("the bank refused %s when it was to settle, after it had "
+                                "accepted it: %s: %s" % (item.reference, code, words))
+            self.let_go(run, item)
+            if self.register:
+                self.register.release(item.document)
 
     def own_account(self) -> set:
         """What a statement may name the paying account by: its IBAN, or in a
@@ -1337,6 +1446,47 @@ def nacha_return_reasons(text: str) -> Dict[str, str]:
             reasons[last] = line[3:6]
             last = ""
     return reasons
+
+
+def refused_transactions(text: str) -> Dict[Tuple[str, str], Tuple[str, str]]:
+    """Every payment a run of `pain.002`s rejects, by the file it was in and
+    its `EndToEndId`: its reason code and the words with it."""
+    refused = {}
+    for root in bank_documents(text):
+        report = root[0]
+        group = next((c for c in report if tag(c) == "OrgnlGrpInfAndSts"), None)
+        if group is None:
+            continue
+        msg_id = child_text(group, "OrgnlMsgId")
+        for transaction in (e for e in report.iter() if tag(e) == "TxInfAndSts"):
+            if child_text(transaction, "TxSts") == "RJCT":
+                refused[(msg_id, child_text(transaction, "OrgnlEndToEndId"))] = (
+                    child_text(transaction, "StsRsnInf", "Rsn", "Cd"),
+                    child_text(transaction, "StsRsnInf", "AddtlInf"))
+    return refused
+
+
+def nacha_returned_entries(text: str) -> List[Dict]:
+    """Every entry of the bank's NACHA return files: the original entry's
+    identification number (the invoice number), amount, receiving bank and
+    account, and the return reason.
+
+    Read by hand, as `nacha_return_reasons` is: the entry detail (`6`) has the
+    account in columns 13 to 29, the amount in cents in 30 to 39 and the
+    identification number in 40 to 54; the addenda after it (`799`) has the
+    reason in 4 to 6 and the original receiving bank's eight digits in 28 to
+    35.
+    """
+    found, entry = [], None
+    for line in text.splitlines():
+        if line.startswith("6"):
+            entry = {"account": line[12:29].strip(), "amount": cents(line[29:39]),
+                     "reference": line[39:54].strip()}
+        elif line.startswith("799") and entry:
+            entry.update(code=line[3:6], routing=line[27:35])
+            found.append(entry)
+            entry = None
+    return found
 
 
 def nacha_time_and_modifier(identification: str) -> Tuple[str, str]:

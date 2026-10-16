@@ -22,6 +22,11 @@ Four things it gets right that are easy to get wrong:
 - **A return reopens what the statement paid.** A payment the supplier's bank
   sends back shows up days later as a credit on the statement, under the same
   `EndToEndId`. The invoice is owed again, and nothing else will say so.
+- **Accepted can still be refused.** A bank that accepted a payment can
+  refuse it on the day it was to settle (the paying account closed in
+  between): a second `pain.002` rejects it, and no statement will ever show
+  it. The invoice goes back to open and held, with the bank's reason, as if
+  it had been refused on acceptance.
 - **Everything is matched by `EndToEndId`**, which is the invoice number, and
   by the `MsgId` it was sent in - never by position or by amount.
 
@@ -337,14 +342,24 @@ class PayInvoices:
             return
         for info in transactions:
             record = self.record_for(msg_id, child_text(info, "OrgnlEndToEndId"))
-            if record is None or record["status"] != "submitted":
+            if record is None:
                 continue
             tx_status = child_text(info, "TxSts")
+            reason = child_text(info, "StsRsnInf", "Rsn", "Cd")
+            detail = child_text(info, "StsRsnInf", "AddtlInf")
+            if record["status"] in ("scheduled", "notified") and tx_status == "RJCT":
+                # Accepted, and then refused on the day it was to settle: the
+                # bank's second word on it. Nothing was debited and no
+                # statement will show it, so it is owed, and held as a
+                # refusal on acceptance is.
+                record.update(status="open", problem="%s: %s (refused when it was to "
+                              "settle, after the bank had accepted it)" % (reason, detail))
+                continue
+            if record["status"] != "submitted":
+                continue
             if tx_status in ACCEPTED:
                 record["status"] = "scheduled"
             elif tx_status == "RJCT":
-                reason = child_text(info, "StsRsnInf", "Rsn", "Cd")
-                detail = child_text(info, "StsRsnInf", "AddtlInf")
                 # Back to open, and held: paying it again would be rejected
                 # again. Someone has to fix the vendor's bank details first.
                 record.update(status="open", problem="%s: %s" % (reason, detail))
