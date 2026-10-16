@@ -42,6 +42,7 @@ dependencies = []
 test = ["mock-sap>=0.21.0", "mock-edi>=0.9.0", "mock-bank", "mock-einvoice"]
 
 [project.urls]
+Homepage = "https://rickseufert.com/examples/"
 Repository = "https://github.com/rseufert/mock-acme"
 Issues = "https://github.com/rseufert/mock-acme/issues"
 Changelog = "https://github.com/rseufert/mock-acme/blob/main/CHANGELOG.md"
