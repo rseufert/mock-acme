@@ -8,7 +8,28 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **A payment the bank accepted and then refused when it was to settle is no
+  longer left accepted for ever** ([#53]). mock-bank 0.9.0 refuses an
+  accepted payment on its settlement day when the paying account has closed
+  in between: a second `pain.002` rejects it with `AC04`, or a NACHA account
+  gets a return file with `R02`, and no statement ever shows it.
+  - `pay_invoices` read a `pain.002` only for a payment still `submitted`.
+    One that rejects a `scheduled` or `notified` payment now puts the
+    invoice back to open and held, with the bank's reason, as a refusal on
+    acceptance does. A paid invoice stays paid.
+  - `PaymentRun.reconcile` now reads those refusals after posting the
+    statements, and an item still `accepted` that the bank refused is
+    `rejected` with the bank's code and its claim in SAP comes off, with a
+    problem saying when it was refused.
+  - A later run that finds an item claimed by another run, and the bank's
+    refusal of that run's payment, takes the claim off itself and pays it,
+    and says whose claim it took off. Before, every later run skipped the
+    invoice as "in payment" and the supplier was never paid.
+  - In NACHA mode the return file names no run, and an entry is matched by
+    the invoice number, amount and receiving account. The README says what
+    that can misread.
 
 ## [0.6.0] - 2026-10-10
 
@@ -430,3 +451,4 @@ These differ from the last copies the mocks carried.
 [#43]: https://github.com/rseufert/mock-acme/issues/43
 [#44]: https://github.com/rseufert/mock-acme/issues/44
 [#46]: https://github.com/rseufert/mock-acme/issues/46
+[#53]: https://github.com/rseufert/mock-acme/issues/53
