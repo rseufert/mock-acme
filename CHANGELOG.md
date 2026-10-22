@@ -8,6 +8,13 @@ says so where it does.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.6.1] - 2026-10-22
+
+A fix: a supplier whose payment the bank refused on its settlement day is
+paid by the next run, where before it was never paid.
+
 ### Fixed
 
 - **A payment the bank accepted and then refused when it was to settle is no
@@ -30,6 +37,12 @@ says so where it does.
   - In NACHA mode the return file names no run, and an entry is matched by
     the invoice number, amount and receiving account. The README says what
     that can misread.
+
+### Changed
+
+- The README and the package's page on PyPI point at the project's page on
+  rickseufert.com, where the worked examples are described
+  ([#52](https://github.com/rseufert/mock-acme/pull/52)).
 
 ## [0.6.0] - 2026-10-10
 
@@ -421,6 +434,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.6.1]: https://github.com/rseufert/mock-acme/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/rseufert/mock-acme/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rseufert/mock-acme/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/rseufert/mock-acme/compare/v0.3.2...v0.4.0
