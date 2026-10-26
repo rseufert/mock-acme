@@ -52,40 +52,109 @@ MOCKS = (
 # the wait is only ever spent on one that is still coming.
 STARTUP_SECONDS = 120
 
+# How many times a mock is started again on a fresh port when the one it was
+# given turned out to be taken.
+PORT_ATTEMPTS = 5
+
+# What each mock's `Server` header starts with. Every mock answers
+# `/_mock/health`, so a 200 alone does not say which one answered; the bodies
+# do not reliably either.
+SERVERS = {
+    "mocksap": "SAP NetWeaver Application Server (mock)",
+    "mockedi": "mock-edi",
+    "mockbank": "mock-bank",
+    "mockeinvoice": "mock-einvoice",
+}
+
 _started = []
+_handed_out = set()
 
 
 def _free_port():
-    """A port nothing is listening on. Another process could take it before the
-    mock binds, and then the mock fails to start and `_wait` says so."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+    """A port nothing is listening on, and not one already handed out in this
+    run. Nothing listens on it until the mock binds, so the operating system can
+    give the same port to the next call, and another process can take it in the
+    meantime. Then the mock fails to start, and `_wait` notices."""
+    while True:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        if port not in _handed_out:
+            _handed_out.add(port)
+            return port
 
 
 free_port = _free_port
 
 
-def _healthy(url):
+class PortTaken(RuntimeError):
+    """The mock exited, and something else is listening on its port."""
+
+
+def _server(url):
+    """The `Server` header of the health answer, or None if there was no 200."""
     try:
         with urllib.request.urlopen(url + "/_mock/health", timeout=2) as response:
-            return response.status == 200
+            if response.status == 200:
+                return response.headers.get("Server", "")
     except (urllib.error.URLError, OSError):
-        return False
+        pass
+    return None
 
 
-def _wait(module, process, url):
+def _taken(port):
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+    return False
+
+
+def _wait(module, process, url, port):
+    """Until the mock started as `process` answers. A 200 from something else on
+    its port does not count: the process has to be the one answering, and still
+    running afterwards."""
+    expected = SERVERS.get(module, "")
     deadline = time.monotonic() + STARTUP_SECONDS
     while time.monotonic() < deadline:
         if process.poll() is not None:
+            if _taken(port):
+                raise PortTaken("%s exited with %s because something else is listening on %d"
+                                % (module, process.returncode, port))
             raise RuntimeError(
                 "%s exited with %s before it answered. Is it installed? "
                 "(pip install mock-sap mock-edi mock-bank mock-einvoice)" % (module, process.returncode))
-        if _healthy(url):
+        server = _server(url)
+        if server is not None and server.startswith(expected) and process.poll() is None:
             return
         time.sleep(0.1)
     raise RuntimeError("%s did not answer %s/_mock/health within %d seconds"
                        % (module, url, STARTUP_SECONDS))
+
+
+def _launch(module, arguments, port):
+    process = subprocess.Popen(
+        [sys.executable, "-m", module, "--port", str(port)] + list(arguments),
+        stdout=subprocess.DEVNULL)
+    _started.append(process)
+    return process
+
+
+def _up(module, arguments, port, process, chosen=False):
+    """Waits for `process`, and returns the mock's URL. If its port was taken,
+    starts it again on a fresh one - unless the port was `chosen` by the caller,
+    who has told another mock of it."""
+    for attempt in range(PORT_ATTEMPTS):
+        url = "http://127.0.0.1:%d" % port
+        try:
+            _wait(module, process, url, port)
+            return url
+        except PortTaken:
+            if chosen or attempt == PORT_ATTEMPTS - 1:
+                raise
+        port = _free_port()
+        process = _launch(module, arguments, port)
 
 
 def _stop():
@@ -109,14 +178,10 @@ def another(module, arguments, port=None):
     `port` is for two mocks that have to be told of each other when they
     start: take two from `free_port`, and start each naming the other's.
     """
+    chosen = port is not None
     port = port or _free_port()
-    process = subprocess.Popen(
-        [sys.executable, "-m", module, "--port", str(port), "-q"] + list(arguments),
-        stdout=subprocess.DEVNULL)
-    _started.append(process)
-    url = "http://127.0.0.1:%d" % port
-    _wait(module, process, url)
-    return url
+    arguments = ["-q"] + list(arguments)
+    return _up(module, arguments, port, _launch(module, arguments, port), chosen)
 
 
 def _start():
@@ -126,16 +191,10 @@ def _start():
         if os.environ.get(variable):
             continue
         port = _free_port()
-        process = subprocess.Popen(
-            [sys.executable, "-m", module, "--port", str(port)] + arguments,
-            stdout=subprocess.DEVNULL)
-        _started.append(process)
-        url = "http://127.0.0.1:%d" % port
-        os.environ[variable] = url
-        waiting.append((module, process, url))
+        waiting.append((variable, module, arguments, port, _launch(module, arguments, port)))
     try:
-        for module, process, url in waiting:
-            _wait(module, process, url)
+        for variable, module, arguments, port, process in waiting:
+            os.environ[variable] = _up(module, arguments, port, process)
     except Exception:
         _stop()
         raise
