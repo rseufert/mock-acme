@@ -8,6 +8,10 @@ says so where it does.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.7.0] - 2026-10-26
+
 Goods receipts in SAP. **Changes behaviour:** `invoice_check` now posts a
 goods receipt to SAP for each shipment, and an invoice that names its
 shipment waits for that receipt. The tests need mock-sap 0.22.0.
@@ -466,6 +470,7 @@ These differ from the last copies the mocks carried.
   for a run to write (rseufert/mock-sap#90). A test states this behaviour so
   that it stays visible.
 
+[0.7.0]: https://github.com/rseufert/mock-acme/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/rseufert/mock-acme/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/rseufert/mock-acme/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rseufert/mock-acme/compare/v0.4.0...v0.5.0
