@@ -71,16 +71,8 @@ INVOICED_ORDER_ITEMS = ("/sap/opu/odata/sap/API_SUPPLIERINVOICE_PROCESS_SRV"
                         "/A_SuplrInvcItemPurOrdRef")
 
 
-def odata_string(value: str) -> str:
-    """A string for an OData `$filter` literal, with its quotes doubled.
-
-    A supplier's invoice number is the supplier's, not ours. `O'BRIEN-014` would
-    close the literal early and the filter becomes a different question - or a
-    syntax error, if you are lucky enough to notice. OData escapes a quote by
-    doubling it, and `urlencode` then percent-encodes the result as the value it
-    is rather than as syntax.
-    """
-    return str(value).replace("'", "''")
+# Beside the two invoice_check asks with, and the same rule for a quote.
+odata_string = invoice_check.odata_string
 
 
 class DurableInvoiceCheck(invoice_check.InvoiceCheck):
@@ -91,24 +83,20 @@ class DurableInvoiceCheck(invoice_check.InvoiceCheck):
     and the supplier's retried `810` looks new: SAP takes a second supplier
     invoice, a second open payable appears, and a payment run pays it.
 
-    Two things will look like they caught it, and neither did. Both are accidents
-    of what *else* the restart lost, which is why they are worth spelling out:
+    Something will look like it caught it, and did not:
 
-    * **Upstream**, a fresh `InvoiceCheck` has forgotten its ship notices as well
-      as what it posted, so a resent invoice arriving on its own is held for a
-      ship notice that came and went before the restart. That is not the
-      duplicate being caught; it is a second thing being missing. Resend the
-      despatch advice with the invoice, which is what a partner replaying a
-      batch does, and the invoice posts again.
     * **Downstream**, in *one* run, `PaymentRun.select` sorts by reference and
       marks the second item with a reference it has already seen as `skipped` -
       deliberately, so two payments in one file cannot share an `EndToEndId`. It
       looks caught. In **the next run** the first payment has cleared, the second
       item is alone in the selection, and it is paid. Nothing refused it.
 
-    So neither end of the chain is checking. Each is forgetting or deduplicating
-    for its own reasons, and the gap between them is where the second payment
-    goes out.
+    So the end of the chain is not checking: it deduplicates for its own
+    reasons, and the second payment goes out in the run after. (A fresh
+    `InvoiceCheck` used to hold a resent invoice for the ship notice it had
+    forgotten, which looked like a catch at the start of the chain too. The
+    shipment's goods receipt is in SAP now (#56), a restart forgets nothing it
+    needs, and the invoice posts.)
 
     So the only place the question can be answered is upstream, against the
     system of record: does SAP already hold a supplier invoice with this
@@ -140,6 +128,27 @@ class DurableInvoiceCheck(invoice_check.InvoiceCheck):
         found = self.sap.request("GET", "%s?%s" % (INVOICED_ORDER_ITEMS, query))
         return sum((Decimal(row["QuantityInPurchaseOrderUnit"])
                     for row in found["d"]["results"]), Decimal(0))
+
+    def already_billed_for(self, po_number, shipment, item):
+        """What SAP holds as invoiced against this shipment's goods receipt,
+        for this order item, whoever posted it.
+
+        Each supplier invoice item that quoted the shipment as its delivery
+        note keeps the receipt it billed (`ReferenceDocument`), so this is
+        the receipt's invoice items added up, and a restart loses none of it.
+        """
+        receipt = self.receipt(po_number, shipment)
+        total = Decimal(0)
+        for document, year in (receipt or {}).get("documents", []):
+            query = urllib.parse.urlencode({"$filter": (
+                "ReferenceDocument eq '%s' and ReferenceDocumentFiscalYear eq '%s' and "
+                "PurchaseOrder eq '%s' and PurchaseOrderItem eq '%s'"
+                % (odata_string(document), odata_string(year), odata_string(po_number),
+                   odata_string(item))), "$format": "json"})
+            found = self.sap.request("GET", "%s?%s" % (INVOICED_ORDER_ITEMS, query))
+            total += sum((Decimal(row["QuantityInPurchaseOrderUnit"])
+                          for row in found["d"]["results"]), Decimal(0))
+        return total
 
     def after_no_answer(self, invoice, po):
         """Nothing to add: `problems` asks SAP whether it holds the invoice."""

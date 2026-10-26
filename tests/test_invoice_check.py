@@ -570,6 +570,157 @@ class MoreThanWasOrdered(unittest.TestCase):
                          ["item 00010 bills 10, with 100 already billed, ordered 100"])
 
 
+class GoodsReceipts(unittest.TestCase):
+    """#56: a shipment is received in SAP, and an invoice that names it bills
+    that receipt. mock-sap 0.22.0."""
+
+    # The supplier-invoice case's set-up and helpers, borrowed rather than
+    # inherited, so its tests do not run twice.
+    setUp, order, invoice_items = (SupplierInvoices.setUp, SupplierInvoices.order,
+                                   SupplierInvoices.invoice_items)
+
+    MATERIAL_ITEMS = ("/sap/opu/odata/sap/API_MATERIAL_DOCUMENT_SRV"
+                      "/A_MaterialDocumentItem")
+
+    def received(self, po):
+        """SAP's goods receipt items for an order, with their headers'
+        delivery notes."""
+        rows = self.sap.request("GET", "%s?%s" % (self.MATERIAL_ITEMS, urllib.parse.urlencode(
+            {"$filter": "PurchaseOrder eq '%s'" % po, "$expand": "to_MaterialDocumentHeader",
+             "$format": "json"})))["d"]["results"]
+        return [(row["to_MaterialDocumentHeader"]["ReferenceDocument"], row["PurchaseOrderItem"],
+                 row["Material"], row["Plant"], Decimal(row["QuantityInEntryUnit"]),
+                 row["EntryUnit"], row["GoodsMovementType"]) for row in rows]
+
+    def notice(self):
+        """The supplier's ship notice, peeked at: (po, shipment, lines)."""
+        [doc] = control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=despatch&leave")
+        from mockacme.invoice_check import read_856, shipment_number
+        po, lines = read_856(doc["payload"])
+        return po, shipment_number(doc["payload"]), lines
+
+    def test_the_ship_notice_is_received_and_the_invoice_bills_the_receipt(self):
+        po = self.order()
+        _po, shipment, lines = self.notice()
+        [result] = self.check.run()
+        self.assertEqual(result["status"], "posted")
+        [receipt] = self.check.receipts
+        self.assertEqual(set(receipt), {"po", "shipment", "material_document"})
+        self.assertEqual(self.received(po), [
+            (shipment, item, material, "1010", lines[item], "PC", "101")
+            for item, material in (("00010", "TG11"), ("00020", "TG12"))])
+        # The invoice quoted the shipment, and SAP keeps the receipt on each item.
+        items = self.invoice_items(result["supplier_invoice"])
+        self.assertEqual({(i["ReferenceDocument"], i["ReferenceDocumentItem"]) for i in items},
+                         {(receipt["material_document"], "0001"),
+                          (receipt["material_document"], "0002")})
+
+    def test_the_invoice_idoc_quotes_its_shipment_as_the_delivery_note(self):
+        invoice = {"number": "INV-1", "po": "4500000001", "date": "20261025",
+                   "lines": {"00010": (Decimal("1"), Decimal("12.50"))},
+                   "total": Decimal("12.50"), "shipment": "SHP-1"}
+        po = {"Supplier": "1000012"}
+        self.assertIn("<E1EDP02><QUALF>016</QUALF><BELNR>SHP-1</BELNR></E1EDP02></E1EDP01>",
+                      invoic_idoc(invoice, po))
+        self.assertNotIn("<QUALF>016</QUALF>", invoic_idoc(dict(invoice, shipment=""), po))
+
+    def test_a_notice_read_again_is_not_received_again(self):
+        po = self.order()
+        self.check.run()
+        notice = min(row["id"] for row in control(EDI, "GET", "/_mock/outbox")
+                     if row["code"] == "856" and row["reference"] == po)
+        control(EDI, "POST", "/_mock/outbox/%d/resend" % notice)
+        self.assertEqual(self.check.run(), [])
+        first, again = self.check.receipts
+        self.assertEqual((again["material_document"], again["already"]),
+                         (first["material_document"], True))
+        self.assertEqual(len(self.received(po)), 2)         # two items, one receipt
+
+    def test_received_apart_from_the_notice_the_invoice_waits_for_the_receipt(self):
+        self.check = InvoiceCheck(self.sap, EDI, our_id="ACME", receive_on_notice=False)
+        po = self.order()
+        _po, shipment, lines = self.notice()
+        [held] = self.check.run()
+        self.assertEqual((held["status"], held["problems"]), ("held", [
+            "invoice %s bills shipment %s, and its ship notice has arrived, and SAP holds "
+            "no goods receipt for that shipment, so it was kept for the next run"
+            % (held["invoice"], shipment)]))
+        self.assertEqual((self.check.receipts, self.received(po)), ([], []))
+        # The warehouse counts the widgets short by ten.
+        counted = dict(lines, **{"00010": lines["00010"] - 10})
+        self.assertIn("material_document", self.check.receive(po, shipment, counted))
+        [blocked] = self.check.run()
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertIn("item 00010 bills %s, received %s in shipment %s"
+                      % (x12(lines["00010"]), x12(counted["00010"]), shipment),
+                      blocked["problems"])
+
+    def test_what_is_not_received(self):
+        po = self.order()
+        lines = {"00010": Decimal("1")}
+        for shipment, why in (
+                ("", "the ship notice gives the shipment no number (BSN02), so there is "
+                     "no delivery note to receive it under"),
+                ("S" * 17, "shipment %s is longer than the 16 characters a goods receipt "
+                           "keeps of a delivery note, so it was not received" % ("S" * 17))):
+            self.assertEqual(self.check.receive(po, shipment, lines),
+                             {"po": po, "shipment": shipment, "problem": why})
+        self.assertEqual(self.check.receive(po, "SHP-NONE", {"00099": Decimal("1")}), {
+            "po": po, "shipment": "SHP-NONE", "problem": "shipment SHP-NONE received nothing "
+            "that is on purchase order %s, so it was not received" % po})
+        self.assertEqual(self.received(po), [])
+        # A receipt of sixteen is taken, and an item not on the order is left
+        # out of it and said.
+        outcome = self.check.receive(po, "S" * 16, {"00010": Decimal("2"), "00099": Decimal("1")})
+        self.assertEqual(outcome["problem"], "item 00099 of shipment %s is not on purchase "
+                         "order %s, so it was not received" % ("S" * 16, po))
+        self.assertEqual([row[:2] for row in self.received(po)], [("S" * 16, "00010")])
+        # Nothing received of an item is no line of the receipt.
+        self.check.receive(po, "SHP-ZERO", {"00010": Decimal("3"), "00020": Decimal("0")})
+        self.assertEqual([row[:2] for row in self.received(po) if row[0] == "SHP-ZERO"],
+                         [("SHP-ZERO", "00010")])
+
+    def test_a_receipt_is_in_the_unit_the_order_is_in(self):
+        po = self.sap.request("POST", PO_SERVICE + "/A_PurchaseOrder", {
+            "PurchaseOrderType": "NB", "CompanyCode": "1710",
+            "PurchasingOrganization": "1710", "PurchasingGroup": "001",
+            "Supplier": "1000012", "DocumentCurrency": "USD",
+            "to_PurchaseOrderItem": [
+                {"Material": "TG11", "OrderQuantity": "12", "NetPriceAmount": "1.00",
+                 "PurchaseOrderQuantityUnit": "EA", "Plant": "1010"}]})["d"]["PurchaseOrder"]
+        self.check.receive(po, "SHP-EA", {"00010": Decimal("12")})
+        self.assertEqual([row[5] for row in self.received(po)], ["EA"])
+
+    def test_a_receipt_sap_refuses_is_said_and_not_tried_again(self):
+        po = self.order()
+        control(SAP, "POST", "/_mock/faults", {"match": "A_MaterialDocumentHeader",
+                                               "method": "POST", "status": 400, "count": 1})
+        [held] = self.check.run()
+        self.assertEqual(held["status"], "held")
+        self.assertEqual([r["problem"] for r in self.check.receipts],
+                         ["SAP answered 400 to its goods receipt, so it was not received"])
+        self.assertEqual(self.check.unreceived, [])
+
+    def test_two_receipts_under_one_delivery_note_are_added_together(self):
+        po = self.order()
+        self.check.receive(po, "SHP-TWO", {"00010": Decimal("30")})
+        self.sap.request("POST", "/sap/opu/odata/sap/API_MATERIAL_DOCUMENT_SRV"
+                         "/A_MaterialDocumentHeader", {
+                             "ReferenceDocument": "SHP-TWO", "to_MaterialDocumentItem": [{
+                                 "Material": "TG11", "Plant": "1010", "PurchaseOrder": po,
+                                 "PurchaseOrderItem": "00010",
+                                 "QuantityInEntryUnit": "5", "EntryUnit": "PC"}]})
+        receipt = self.check.receipt(po, "SHP-TWO")
+        self.assertEqual((len(receipt["documents"]), receipt["items"]),
+                         (2, {"00010": Decimal("35")}))
+        self.assertIsNone(self.check.receipt("4500999999", "SHP-TWO"))
+        self.assertIsNone(self.check.receipt(po, "SHP-O'NONE"))
+
+
+def x12(quantity):
+    return po_bridge.x12_quantity(quantity)
+
+
 class WhenSapCannotBeAsked(unittest.TestCase):
     """#13: an invoice taken out of the mailbox is kept until SAP has dealt with it."""
 
@@ -581,10 +732,10 @@ class WhenSapCannotBeAsked(unittest.TestCase):
         self.po = one_line_order(self.sap, "100")
         self.assertTrue(send_order(self.sap, EDI, self.po, sender="ACME")["accepted"])
 
-    def sap_fails_once(self, method, match):
+    def sap_fails_once(self, method, match, count=1):
         control(SAP, "POST", "/_mock/faults", {
             "match": match, "method": method, "status": 503,
-            "message": "No dialog work process available", "count": 1})
+            "message": "No dialog work process available", "count": count})
 
     def invoice_idocs(self):
         return control(SAP, "GET", "/_mock/idocs?mestyp=INVOIC")["results"]
@@ -592,12 +743,16 @@ class WhenSapCannotBeAsked(unittest.TestCase):
     def posted_ones(self):
         return [i for i in self.invoice_idocs() if i["status"] == "53"]
 
-    def no_answer_once(self, method, match, deliver=False):
-        """SAP's answer to one request is lost. With `deliver`, after SAP acted."""
-        real, state = self.sap.request, {"done": False}
+    def no_answer_once(self, method, match, deliver=False, after=0):
+        """SAP's answer to one request is lost. With `deliver`, after SAP acted.
+        With `after`, that many such requests are answered first."""
+        real, state = self.sap.request, {"done": False, "let": after}
 
         def request(verb, path, body=None, content_type="application/json"):
             if verb == method and match in path and not state["done"]:
+                if state["let"]:
+                    state["let"] -= 1
+                    return real(verb, path, body, content_type)
                 state["done"] = True
                 if deliver:
                     real(verb, path, body, content_type)
@@ -606,8 +761,12 @@ class WhenSapCannotBeAsked(unittest.TestCase):
         return unittest.mock.patch.object(self.sap, "request", request)
 
     def test_an_order_sap_cannot_show_is_asked_about_again(self):
-        self.sap_fails_once("GET", "A_PurchaseOrder")
+        # Twice: the ship notice's goods receipt reads the order first.
+        self.sap_fails_once("GET", "A_PurchaseOrder", count=2)
         [waiting] = self.check.run()
+        self.assertEqual([r.get("problem") for r in self.check.receipts], [
+            "SAP answered 503 to its goods receipt, so it was kept for the next run"])
+        self.assertEqual(len(self.check.unreceived), 1)
         self.assertEqual(waiting["status"], "waiting")
         self.assertIn("answered 503 to reading purchase order %s" % self.po,
                       waiting["problems"][0])
@@ -617,6 +776,8 @@ class WhenSapCannotBeAsked(unittest.TestCase):
         [posted] = self.check.run()                 # SAP is back; the mailbox is empty
         self.assertEqual(posted["status"], "posted")
         self.assertEqual(self.check.pending, [])
+        self.assertEqual(self.check.unreceived, [])
+        self.assertTrue(self.check.receipts[-1]["material_document"])
         self.assertEqual(len(self.posted_ones()), 1)
 
     def test_an_idoc_sap_would_not_take_is_sent_again(self):
@@ -630,7 +791,8 @@ class WhenSapCannotBeAsked(unittest.TestCase):
         self.assertEqual(self.check.run(), [], "and it is not kept after that")
 
     def test_no_answer_about_the_order_is_asked_again(self):
-        with self.no_answer_once("GET", "A_PurchaseOrder"):
+        # After the one the ship notice's goods receipt reads.
+        with self.no_answer_once("GET", "A_PurchaseOrder", after=1):
             [waiting] = self.check.run()
             self.assertEqual(waiting["status"], "waiting")
             self.assertIn("did not answer about purchase order", waiting["problems"][0])
