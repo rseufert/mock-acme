@@ -8,7 +8,39 @@ says so where it does.
 
 ## [Unreleased]
 
-Nothing yet.
+Goods receipts in SAP. **Changes behaviour:** `invoice_check` now posts a
+goods receipt to SAP for each shipment, and an invoice that names its
+shipment waits for that receipt. The tests need mock-sap 0.22.0.
+
+### Added
+
+- **A shipment is received in SAP** ([#56]). For each ship notice that
+  numbers its shipment, `invoice_check` posts a goods receipt
+  (`API_MATERIAL_DOCUMENT_SRV`) with the shipment's number as the supplier's
+  delivery note, against the order's items, material and plant. SAP is asked
+  first, so a notice read twice, or by a process started again, is received
+  once. By default the notice is taken as the receipt; `receive_on_notice=False`
+  and `InvoiceCheck.receive` are for a caller that counts what arrived.
+- **An invoice that names its shipment quotes it as its delivery note**
+  (`E1EDP02` `QUALF` `016`), and SAP keeps the goods receipt on each invoice
+  item it billed.
+
+### Changed
+
+- **What a shipment has been billed survives a restart in
+  `DurableInvoiceCheck`**, which asks SAP by the goods receipt instead of
+  keeping a count in memory (#41's count). A new process blocks a second
+  invoice for a shipment already billed, where it posted it.
+- **An invoice that names its shipment is matched against what its goods
+  receipt received**, and held until SAP holds one: "received 4200 in shipment
+  ...", where it said "shipped". Nor is it held after a restart for a ship
+  notice the new process never saw, since the receipt is in SAP.
+- **`InvoiceCheck`, the check that asks SAP nothing, posts an invoice sent
+  again after a restart**, where it used to hold it for the forgotten ship
+  notice. That hold was never the duplicate being caught; `DurableInvoiceCheck`
+  is what catches it, and is what `ProcureToPay` uses.
+- `procure_to_pay.odata_string` is `invoice_check.odata_string`, moved where
+  both use it.
 
 ## [0.6.1] - 2026-10-22
 
@@ -466,3 +498,4 @@ These differ from the last copies the mocks carried.
 [#44]: https://github.com/rseufert/mock-acme/issues/44
 [#46]: https://github.com/rseufert/mock-acme/issues/46
 [#53]: https://github.com/rseufert/mock-acme/issues/53
+[#56]: https://github.com/rseufert/mock-acme/issues/56

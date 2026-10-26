@@ -19,7 +19,7 @@ describes each one, and the mocks' own pages are linked from it.
 | Module | Carries | Between |
 | --- | --- | --- |
 | `mockacme.po_bridge` | a purchase order out as an 850, the 855 back as an ORDRSP IDoc | SAP, supplier |
-| `mockacme.invoice_check` | the supplier's 856 and 810, matched to the order, posted as an INVOIC IDoc or blocked, or held while the invoice's own ship notice has not arrived | SAP, supplier |
+| `mockacme.invoice_check` | the supplier's 856 received in SAP as a goods receipt, and its 810 matched to the order and the receipt, posted as an INVOIC IDoc or blocked, or held while the invoice's own shipment has not been received | SAP, supplier |
 | `mockacme.pay_invoices` | a supplier's 810s, paid as a pain.001 and followed to the statement | supplier, bank |
 | `mockacme.payment_run` | SAP's open items, paid as a pain.001 or a NACHA file, cleared by posting the statement as a FINSTA01 | SAP, bank |
 | `mockacme.remittance` | SAP's payment advice (a PEXR2002 it generates) out as an 820, and what the supplier made of it | SAP, supplier |
@@ -142,18 +142,24 @@ both reasons, the supplier is told nothing, and "paid" is never said for it. A
 person has to look. An XRechnung invoice, which is told nothing, is reported
 as blocked for being in SAP after every restart, for the same reason.
 
-What a shipment has been billed is one process's memory. `invoice_check`
-counts each invoice against the shipment it names, so a supplier that bills
-one delivery twice under two invoice numbers has the second blocked
-([#41](https://github.com/rseufert/mock-acme/issues/41)). A restart loses the
-count, in `DurableInvoiceCheck` as well: it asks SAP what an order has been
-billed, and SAP's supplier invoice has nowhere to say which shipment it was
-for, in mock-sap and so here. A new process holds such an invoice for a ship
-notice it never saw; if the supplier sends that notice again, the invoice is
-posted. And an invoice that names no shipment is not counted against one at
-all: two of them for parts of one delivery are each compared with the order's
-latest notice on its own. mock-edi sends neither a second invoice for a
-shipment nor one that names none, so the tests write them.
+A ship notice is taken as the goods receipt. `invoice_check` posts a goods
+receipt to SAP for each shipment as soon as its 856 is read, for what the
+notice says was sent ([#56](https://github.com/rseufert/mock-acme/issues/56)).
+A real receipt is the warehouse's count of what arrived, posted when it
+arrives; nothing here models a warehouse. A caller that does passes
+`receive_on_notice=False` and calls `receive` with the count, and an invoice
+that names its shipment then waits for that. The receipt posts no accounting
+document, in mock-sap and so here, so there is no GR/IR clearing to look at.
+
+What a shipment has been billed is SAP's to say in `DurableInvoiceCheck`,
+which asks it by the goods receipt each invoice item billed, and survives a
+restart. `InvoiceCheck`, which asks SAP nothing, keeps the count in memory
+and loses it, as it loses what it posted: a new process posts a second
+invoice for a shipment already billed. An invoice that names no shipment is
+not counted against one at all: two of them for parts of one delivery are
+each compared with the order's latest notice on its own, which is memory too.
+mock-edi sends neither a second invoice for a shipment nor one that names
+none, so the tests write them.
 
 A held invoice waits for ever if its ship notice never comes, and is reported
 as held on every run. What is held, like what has shipped, is one process's

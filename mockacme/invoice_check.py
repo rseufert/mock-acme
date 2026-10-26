@@ -37,14 +37,30 @@ wrong price does not get better when the goods arrive. An invoice that names
 no shipment is matched against the order's latest notice, as before, and is
 blocked if it bills more.
 
+**A shipment is received in SAP.** For each shipment its ship notice numbers,
+a goods receipt is posted to SAP (`receive`): a material document with the
+shipment's number as the supplier's delivery note, against the order's items,
+material and plant, for the quantities received. SAP is asked first, so a
+notice read twice, or by a process started again, is not received twice. By
+default the notice is taken as the receipt, as soon as it is read: nothing
+here models a warehouse counting what came off the truck. A caller that does
+passes `receive_on_notice=False` and calls `receive` with what was counted.
+The receipt posts no accounting document, in mock-sap and so here.
+
+**An invoice that names its shipment is matched against its goods receipt.**
+It is sent to SAP quoting the shipment as its delivery note (`E1EDP02` `QUALF`
+`016`), and SAP keeps the receipt on each invoice item it billed. Until SAP
+holds that receipt the invoice is held, as it is before its notice comes: SAP
+would refuse an invoice quoting a receipt it does not have.
+
 **A shipment is billed once, under however many numbers.** An invoice that
 names its shipment is counted against it, so a second invoice for a shipment
 already billed in full is blocked whatever number it carries, and two that
 share a shipment between them are both posted. Without that the second one
 passes every other check while the order still has quantity left: it bills
-less than the notice says was sent, and no more than was ordered. The count
-is this process's memory, here and in `DurableInvoiceCheck` alike: SAP's
-supplier invoice has nowhere to say which shipment it was for. An invoice
+less than the shipment received, and no more than was ordered. Here the count
+is this process's memory; `DurableInvoiceCheck` asks SAP what has been billed
+against the shipment's receipt, which a restart does not lose. An invoice
 that names no shipment cannot be counted this way, and is not.
 
 **No over-delivery tolerance is read.** A real purchase order item can allow
@@ -66,12 +82,21 @@ import datetime
 import http.cookiejar
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from decimal import Decimal
 
 from .po_bridge import x12_quantity
 
 PO_SERVICE = "/sap/opu/odata/sap/API_PURCHASEORDER_PROCESS_SRV"
+MATERIAL_DOCUMENTS = ("/sap/opu/odata/sap/API_MATERIAL_DOCUMENT_SRV"
+                      "/A_MaterialDocumentHeader")
+
+# The longest delivery note a goods receipt holds (`MKPF-XBLNR`). mock-sap cuts
+# a longer one short and keeps it, and an invoice quoting the whole number
+# would then find no receipt; so a longer shipment number is not received.
+DELIVERY_NOTE_LENGTH = 16
+GOODS_RECEIPT = "101"       # the movement type of a receipt against an order
 
 # SAP material -> the supplier's part number (the purchasing info record)
 SUPPLIER_PART = {"TG11": "WIDGET-001", "TG12": "BRKT-050", "TG14": "GEAR-100"}
@@ -154,6 +179,18 @@ def send_order(sap, edi_base, po_number, sender, receiver="MOCKEDI", control=1):
             sender, receiver, now.strftime("%Y%m%d"), now.strftime("%H%M"), control)]
     trailer = ["GE*1*%d" % control, "IEA*1*%09d" % control]
     return edi(edi_base, "POST", "/edi", "~\n".join(envelope + body + trailer) + "~\n")
+
+
+def odata_string(value):
+    """A string for an OData `$filter` literal, with its quotes doubled.
+
+    A supplier's invoice number is the supplier's, not ours. `O'BRIEN-014` would
+    close the literal early and the filter becomes a different question - or a
+    syntax error, if you are lucky enough to notice. OData escapes a quote by
+    doubling it, and `urlencode` then percent-encodes the result as the value it
+    is rather than as syntax.
+    """
+    return str(value).replace("'", "''")
 
 
 def segments(payload):
@@ -245,6 +282,9 @@ def invoic_idoc(invoice, po):
         payable's baseline date and so decides when it falls due.
       - ``NETWR`` and ``VGBEL``/``VGPOS`` per item, or the payable's lines carry
         no value and name no purchase order.
+      - ``E1EDP02`` with ``QUALF`` **016** per item, where the invoice names its
+        shipment: the supplier's delivery note, by which SAP finds the goods
+        receipt the item bills and keeps it on the item (mock-sap#193).
       - ``E1EDS01`` sums. ``010`` is what is owed, tax included. When the
         invoice carries tax, ``011`` is the net and ``205`` the tax, so that SAP
         books the expense and the input tax apart instead of expensing the tax.
@@ -259,6 +299,8 @@ def invoic_idoc(invoice, po):
     currency = invoice.get("currency") or po.get("DocumentCurrency") or "USD"
     terms = TERMS_BY_NET_DAYS.get(invoice.get("net_days"), "")
     tax = invoice.get("tax") or Decimal("0.00")
+    note = ("<E1EDP02><QUALF>016</QUALF><BELNR>%s</BELNR></E1EDP02>" % invoice["shipment"]
+            if invoice.get("shipment") else "")
     sums = "<E1EDS01><SUMID>010</SUMID><SUMME>%s</SUMME></E1EDS01>" % invoice["total"]
     if tax:
         sums += ("<E1EDS01><SUMID>011</SUMID><SUMME>%s</SUMME></E1EDS01>"
@@ -267,8 +309,8 @@ def invoic_idoc(invoice, po):
     items = "".join(
         "<E1EDP01><POSEX>%s</POSEX><MENGE>%s</MENGE><VPREI>%s</VPREI>"
         "<NETWR>%s</NETWR><VGBEL>%s</VGBEL><VGPOS>%s</VGPOS>"
-        "<E1EDP02><QUALF>001</QUALF><BELNR>%s</BELNR><ZEILE>%s</ZEILE></E1EDP02></E1EDP01>"
-        % (item, qty, price, qty * price, invoice["po"], item, invoice["po"], item)
+        "<E1EDP02><QUALF>001</QUALF><BELNR>%s</BELNR><ZEILE>%s</ZEILE></E1EDP02>%s</E1EDP01>"
+        % (item, qty, price, qty * price, invoice["po"], item, invoice["po"], item, note)
         for item, (qty, price) in sorted(invoice["lines"].items()))
     return ("<INVOIC02><IDOC BEGIN=\"1\"><EDI_DC40 SEGMENT=\"1\">"
             "<IDOCTYP>INVOIC02</IDOCTYP><MESTYP>INVOIC</MESTYP><DIRECT>2</DIRECT>"
@@ -284,8 +326,17 @@ def invoic_idoc(invoice, po):
 
 
 class InvoiceCheck:
-    def __init__(self, sap, edi_base, our_id):
+    def __init__(self, sap, edi_base, our_id, receive_on_notice=True):
         self.sap, self.edi_base, self.our_id = sap, edi_base, our_id
+        # Whether a ship notice is received in SAP as soon as it is read.
+        self.receive_on_notice = receive_on_notice
+        # Shipments to receive that SAP could not be asked about or did not
+        # take: (po_number, shipment number, {item: quantity}), tried again
+        # on the next run.
+        self.unreceived = []
+        # What became of each receipt: {"po", "shipment", and
+        # "material_document" or "problem"}, oldest first.
+        self.receipts = []
         self.shipped = {}       # po_number -> {item: quantity}, from 856s
         # (po_number, shipment number) -> {item: quantity}: each 856 by the
         # consignment it advises, for an invoice that names the one it bills.
@@ -311,10 +362,104 @@ class InvoiceCheck:
     def already_billed_for(self, po_number, shipment, item):
         """What earlier invoices have billed for this item of this shipment.
 
-        From this object's own memory, and there is nowhere else to ask:
-        mock-sap's supplier invoice does not hold the shipment it was for.
+        From this object's own memory of what it posted. SAP can say too, by
+        the goods receipt each invoice item billed, and
+        `procure_to_pay.DurableInvoiceCheck` asks it.
         """
         return self.billed_for.get((po_number, shipment), {}).get(item, Decimal(0))
+
+    # -- goods receipts -----------------------------------------------------
+
+    def receipt(self, po_number, shipment):
+        """SAP's goods receipt for this shipment of this order, or None:
+        `{"documents": [(material document, year)], "items": {item: quantity}}`.
+
+        Found by the delivery note, which is the shipment's number, and kept
+        to the items received against this order. Two receipts under one
+        delivery note, which this check never posts, are added together.
+        """
+        query = urllib.parse.urlencode({
+            "$filter": "ReferenceDocument eq '%s'" % odata_string(shipment),
+            "$expand": "to_MaterialDocumentItem", "$format": "json"})
+        found = {"documents": [], "items": {}}
+        for header in self.sap.request("GET", "%s?%s" % (MATERIAL_DOCUMENTS, query))["d"]["results"]:
+            lines = [line for line in header["to_MaterialDocumentItem"]["results"]
+                     if line["PurchaseOrder"] == po_number]
+            if not lines:
+                continue
+            found["documents"].append((header["MaterialDocument"],
+                                       header["MaterialDocumentYear"]))
+            for line in lines:
+                item = line["PurchaseOrderItem"]
+                found["items"][item] = (found["items"].get(item, Decimal(0))
+                                        + Decimal(line["QuantityInEntryUnit"]))
+        return found if found["documents"] else None
+
+    def receive(self, po_number, shipment, lines, po=None):
+        """Post SAP's goods receipt for a shipment, unless SAP has one.
+
+        `lines` is `{item: quantity received}`, by the order's item numbers.
+        Returns what became of it, as `receipts` keeps it. An item that is not
+        on the order is not received: a receipt item names the order item it
+        receives, and SAP has no such item. Raises what SAP's answer raises,
+        for the caller to try again.
+        """
+        outcome = {"po": po_number, "shipment": shipment}
+        if not shipment:
+            return dict(outcome, problem="the ship notice gives the shipment no number "
+                        "(BSN02), so there is no delivery note to receive it under")
+        if len(shipment) > DELIVERY_NOTE_LENGTH:
+            return dict(outcome, problem="shipment %s is longer than the %d characters "
+                        "a goods receipt keeps of a delivery note, so it was not received"
+                        % (shipment, DELIVERY_NOTE_LENGTH))
+        existing = self.receipt(po_number, shipment)
+        if existing:
+            return dict(outcome, material_document=existing["documents"][0][0],
+                        already=True)
+        po = po or self.sap.purchase_order(po_number)
+        ordered = {i["PurchaseOrderItem"]: i for i in po["to_PurchaseOrderItem"]["results"]}
+        items = [{"Material": ordered[item]["Material"], "Plant": ordered[item]["Plant"],
+                  "PurchaseOrder": po_number, "PurchaseOrderItem": item,
+                  "GoodsMovementType": GOODS_RECEIPT,
+                  "QuantityInEntryUnit": str(quantity),
+                  "EntryUnit": ordered[item]["PurchaseOrderQuantityUnit"]}
+                 for item, quantity in sorted(lines.items()) if item in ordered and quantity]
+        if not items:
+            return dict(outcome, problem="shipment %s received nothing that is on purchase "
+                        "order %s, so it was not received" % (shipment, po_number))
+        posted = self.sap.request("POST", MATERIAL_DOCUMENTS, {
+            "ReferenceDocument": shipment, "to_MaterialDocumentItem": items})
+        outcome["material_document"] = posted["d"]["MaterialDocument"]
+        strays = sorted(set(lines) - set(ordered))
+        if strays:
+            outcome["problem"] = ("item %s of shipment %s is not on purchase order %s, "
+                                  "so it was not received" % (", ".join(strays), shipment,
+                                                              po_number))
+        return outcome
+
+    def receive_waiting(self):
+        """Receive each shipment waiting to be, keeping what SAP did not take."""
+        waiting, self.unreceived = self.unreceived, []
+        for po_number, shipment, lines in waiting:
+            try:
+                self.receipts.append(self.receive(po_number, shipment, lines))
+            except urllib.error.HTTPError as error:
+                # A 5xx is SAP saying it could not, and the receipt is tried
+                # again; anything else is SAP saying no, which trying again
+                # does not change.
+                again = error.code >= 500
+                self.receipts.append({"po": po_number, "shipment": shipment, "problem":
+                                      "SAP answered %d to its goods receipt, so it was %s"
+                                      % (error.code, "kept for the next run" if again
+                                         else "not received")})
+                if again:
+                    self.unreceived.append((po_number, shipment, lines))
+            except (urllib.error.URLError, OSError) as error:
+                self.receipts.append({"po": po_number, "shipment": shipment, "problem":
+                                      "SAP did not answer about its goods receipt, so it "
+                                      "was kept for the next run: %s"
+                                      % getattr(error, "reason", error)})
+                self.unreceived.append((po_number, shipment, lines))
 
     def after_no_answer(self, invoice, po):
         """Why an invoice whose IDoc SAP never answered must not be sent again.
@@ -328,19 +473,26 @@ class InvoiceCheck:
                 "it may hold it already; it was not sent again" % invoice["number"]]
 
     def awaited(self, invoice):
-        """The shipment an invoice names whose ship notice has not arrived, or ""."""
+        """Why an invoice naming its shipment waits, or "": its ship notice has
+        not arrived, or SAP holds no goods receipt for the shipment yet."""
         named = invoice.get("shipment") or ""
-        return "" if (invoice["po"], named) in self.notices else named
+        if not named or self.receipt(invoice["po"], named):
+            return ""
+        if (invoice["po"], named) in self.notices:
+            return ("its ship notice has arrived, and SAP holds no goods receipt for "
+                    "that shipment")
+        return "no ship notice for that shipment has arrived"
 
     def shipped_for(self, invoice):
-        """What the ship notice this invoice is matched against says was sent:
-        the notice of the shipment it names, or the order's latest where it
-        names none. None while the one it names has not arrived, which is not
-        a quantity to compare with."""
+        """What this invoice is matched against: for the shipment it names,
+        what SAP's goods receipt for it received; where it names none, what
+        the order's latest ship notice says was sent. None while the shipment
+        it names has no receipt, which is not a quantity to compare with."""
         named = invoice.get("shipment") or ""
         if not named:
             return self.shipped.get(invoice["po"], {})
-        return self.notices.get((invoice["po"], named))
+        receipt = self.receipt(invoice["po"], named)
+        return receipt["items"] if receipt else None
 
     def problems(self, invoice, po):
         """Why this invoice must not be posted; empty if it may be."""
@@ -381,10 +533,12 @@ class InvoiceCheck:
                 named = invoice.get("shipment") or ""
                 earlier = self.already_billed_for(invoice["po"], named, item)
                 if earlier + qty > shipped.get(item, 0):
-                    found.append("item %s bills %s, shipped %s%s" % (
-                        item, qty, shipped.get(item, 0),
-                        " in shipment %s, with %s already billed against it"
-                        % (named, x12_quantity(earlier)) if earlier else ""))
+                    found.append("item %s bills %s, %s %s%s" % (
+                        item, qty, "received" if named else "shipped",
+                        x12_quantity(shipped.get(item, Decimal(0))),
+                        " in shipment %s%s" % (named, ", with %s already billed against it"
+                                               % x12_quantity(earlier) if earlier else "")
+                        if named else ""))
         tax = invoice.get("tax") or Decimal("0.00")
         if total + tax != invoice["total"]:
             # Said with the tax, or without it when there is none, so that the
@@ -412,6 +566,10 @@ class InvoiceCheck:
                 number = shipment_number(doc["payload"])
                 if number:
                     self.notices[(po_number, number)] = lines
+                if self.receive_on_notice:
+                    self.unreceived.append((po_number, number, lines))
+        # Before the invoices, which wait for their shipment's receipt.
+        self.receive_waiting()
         # Kept before anything is asked of SAP, so that an invoice SAP cannot
         # be asked about is still here next time (#13).
         self.pending += [(read_810(doc["payload"]), False)
@@ -471,8 +629,8 @@ class InvoiceCheck:
             # sent. Not posted, so nothing can pay it; kept, so that it posts
             # when the notice comes.
             result.update(status="held", problems=[
-                "invoice %s bills shipment %s, and no ship notice for that shipment has "
-                "arrived, so it was kept for the next run" % (invoice["number"], awaited)])
+                "invoice %s bills shipment %s, and %s, so it was kept for the next run"
+                % (invoice["number"], invoice["shipment"], awaited)])
             return result, unanswered
         try:
             receipt = self.sap.request("POST", "/sap/bc/idoc",

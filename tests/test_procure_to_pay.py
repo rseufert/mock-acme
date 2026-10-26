@@ -375,29 +375,25 @@ class TestTheSameInvoiceTwice(PurchaseCase):
         self.assertFalse(self.p2p.check.already_posted(reference, INITECH),
                          "another supplier's invoice of the same number is not ours")
 
-    def test_a_resent_invoice_alone_is_stopped_for_the_wrong_reason(self):
-        """The upstream near miss, held by a test rather than only described.
+    def test_a_resent_invoice_alone_is_posted_again_without_the_sap_check(self):
+        """The upstream near miss is gone (#56), and this holds that it is.
 
-        Resend only the invoice and a restarted middleware does not post it -
-        but because it waits for the ship notice of the shipment the invoice
-        names, which the restart forgot too. That is a second thing being
-        missing, not the duplicate being caught, and it is why `test_2` resends
-        the despatch advice as well. If this ever starts failing with a
-        different reason, the story the example tells about accidental
-        protection has changed.
+        A restarted middleware used to hold a resent invoice for the ship
+        notice the restart forgot, which looked like the duplicate being
+        caught and was not. The shipment's goods receipt is in SAP now, which
+        a restart does not forget, so nothing is missing and a check that asks
+        SAP nothing posts the invoice a second time. Only the question
+        `DurableInvoiceCheck` asks stops it (`test_2b`).
         """
         po = self.purchase()
         self.p2p.approve()
         self.supplier_resends(po, "invoice")           # the invoice, and nothing else
 
-        restarted = self.middleware(durable=False)     # no SAP check, so the
-        [result] = restarted.approve()                 # only objection is the match
+        restarted = self.middleware(durable=False)     # no SAP check
+        [result] = restarted.approve()
 
-        self.assertEqual(result["status"], "held")
-        self.assertIn("no ship notice for that shipment has arrived", result["problems"][0])
-        self.assertEqual(len(self.open_items()), 1, "still one thing owed, not two")
-        # And it is still waiting on the next run, and the one after.
-        self.assertEqual([r["status"] for r in restarted.approve()], ["held"])
+        self.assertEqual((result["status"], result["problems"]), ("posted", []))
+        self.assertEqual(len(self.open_items()), 2, "owed twice")
 
     def test_an_invoice_number_holding_a_quote_is_asked_about_correctly(self):
         """`O'BRIEN-014` is a supplier's invoice number, not OData syntax.
@@ -584,7 +580,8 @@ class TestOneOrderTwoDeliveries(PurchaseCase):
         self.assertEqual(result["status"], "blocked")
         # Nothing has been billed against the shipment, and the reason does
         # not say that anything has.
-        self.assertIn("item 00010 bills 4201, shipped 4200", result["problems"])
+        self.assertIn("item 00010 bills 4201, received 4200 in shipment %s"
+                      % read_810(payload)["shipment"], result["problems"])
 
     def first_invoice(self):
         """The supplier's 810 for the first delivery, taken out of the mailbox."""
@@ -618,7 +615,7 @@ class TestOneOrderTwoDeliveries(PurchaseCase):
         self.assertEqual(again["shipment"], read_810(payload)["shipment"])
         result = self.approve_one(again)
         self.assertEqual((result["status"], result["problems"]), ("blocked", [
-            "item 00010 bills 800, shipped 4200 in shipment %s, with 4200 already "
+            "item 00010 bills 800, received 4200 in shipment %s, with 4200 already "
             "billed against it" % again["shipment"]]))
         self.assertEqual(self.owed(), [Decimal("52500.00")])
         # And the balance's own invoice, when it ships, is posted.
@@ -670,26 +667,45 @@ class TestOneOrderTwoDeliveries(PurchaseCase):
             result = self.approve_one(invoice)
             self.assertEqual((result["status"], result["problems"]), ("posted", []))
 
-    def test_started_again_the_count_is_gone_and_the_second_invoice_is_posted(self):
-        """Known to be wrong, and in the README. What a shipment has been
-        billed is this process's memory, and SAP has nowhere to keep it. A new
-        process holds the second invoice for a ship notice it never saw, which
-        is the count being lost and not the invoice being caught: send the
-        notice again with it, as a partner replaying a batch does, and it is
-        posted."""
+    def test_started_again_the_count_is_asked_of_sap_and_the_second_is_blocked(self):
+        """#56: what a shipment has been billed is in SAP, on each invoice item
+        that quoted its goods receipt, so a new process asks rather than
+        forgetting. Nor does it hold the second invoice for a ship notice it
+        never saw: the receipt is in SAP too."""
         po = self.purchase(quantity=self.ORDERED)
         payload = self.first_invoice()
-        self.approve_one(read_810(payload))
+        first = self.approve_one(read_810(payload))
+        self.assertEqual(first["status"], "posted")
         again = self.billing(payload, "INV-AGAIN", 800)
 
         self.p2p = self.middleware()
-        held = self.approve_one(again)
-        self.assertEqual(held["status"], "held")
+        result = self.approve_one(again)
+        self.assertEqual((result["status"], result["problems"]), ("blocked", [
+            "item 00010 bills 800, received 4200 in shipment %s, with 4200 already "
+            "billed against it" % again["shipment"]]))
+        # And the notice sent again is not received twice.
         notice = min(row["id"] for row in control(EDI, "GET", "/_mock/outbox")
                      if row["code"] == "856" and row["reference"] == po)
         control(EDI, "POST", "/_mock/outbox/%d/resend" % notice)
-        [result] = self.p2p.approve()
-        self.assertEqual((result["invoice"], result["status"]), ("INV-AGAIN", "posted"))
+        self.assertEqual(self.p2p.approve(), [])
+        self.assertTrue(self.p2p.check.receipts[-1]["already"])
+        self.assertEqual(len(self.goods_receipts(po)), 1)
+
+    def goods_receipts(self, po):
+        """SAP's goods receipt items for an order."""
+        return odata(SAP, "/sap/opu/odata/sap/API_MATERIAL_DOCUMENT_SRV/A_MaterialDocumentItem",
+                     **{"$filter": "PurchaseOrder eq '%s'" % po})
+
+    def test_the_restart_unsafe_count_is_this_process_without_sap(self):
+        """The same, with the check that asks SAP nothing: a new process has
+        no count, and posts the second invoice. Why `DurableInvoiceCheck` is
+        the default."""
+        self.purchase(quantity=self.ORDERED)
+        payload = self.first_invoice()
+        self.approve_one(read_810(payload))
+        self.p2p = self.middleware(durable=False)
+        result = self.approve_one(self.billing(payload, "INV-AGAIN", 800))
+        self.assertEqual(result["status"], "posted")
 
     def test_the_backorders_invoice_is_not_let_through_on_the_first_delivery(self):
         """Its own ship notice is the one it waits for: the first delivery's
