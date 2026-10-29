@@ -717,6 +717,56 @@ class GoodsReceipts(unittest.TestCase):
         self.assertIsNone(self.check.receipt(po, "SHP-O'NONE"))
 
 
+class WhenTheMailboxCannotBeRead(unittest.TestCase):
+    """#63: what is collected from the mailbox is kept, whatever the next
+    request does, because collecting took it out."""
+
+    setUp, order = SupplierInvoices.setUp, SupplierInvoices.order
+
+    def mailbox_fails_once(self, kind):
+        """The supplier's mailbox does not answer one request for this kind."""
+        import mockacme.invoice_check as module
+        real, state = module.edi, {"done": False}
+
+        def edi(base, method, path, body=None):
+            if "kind=%s" % kind in path and not state["done"]:
+                state["done"] = True
+                raise urllib.error.URLError("timed out")
+            return real(base, method, path, body)
+        return unittest.mock.patch.object(module, "edi", edi)
+
+    def test_a_failed_invoice_read_loses_no_ship_notice(self):
+        po = self.order()
+        with self.mailbox_fails_once("invoice"):
+            self.assertEqual(self.check.run(), [])
+        self.assertEqual(self.check.unread, [
+            "the supplier's mailbox did not give its invoice documents, so none was read "
+            "this run: timed out"])
+        # The notice was taken out of the mailbox and is not lost: recorded,
+        # and received in SAP.
+        [receipt] = self.check.receipts
+        self.assertTrue(receipt["material_document"])
+        self.assertEqual(len(self.check.notices), 1)
+        self.assertEqual(control(EDI, "GET", "/_mock/mailbox?partner=ACME&kind=despatch&leave"),
+                         [])
+        # The invoice is still in the mailbox, and the next run posts it.
+        [result] = self.check.run()
+        self.assertEqual((result["po"], result["status"]), (po, "posted"))
+
+    def test_a_failed_notice_read_leaves_the_invoices_in_the_mailbox_too(self):
+        po = self.order()
+        with self.mailbox_fails_once("despatch"):
+            self.assertEqual(self.check.run(), [])
+        self.assertEqual(self.check.unread, [
+            "the supplier's mailbox did not give its despatch documents, so none was read "
+            "this run: timed out"])
+        self.assertEqual((self.check.receipts, self.check.pending), ([], []))
+        self.assertEqual(len(control(EDI, "GET",
+                                     "/_mock/mailbox?partner=ACME&kind=invoice&leave")), 1)
+        [result] = self.check.run()
+        self.assertEqual((result["po"], result["status"]), (po, "posted"))
+
+
 def x12(quantity):
     return po_bridge.x12_quantity(quantity)
 
