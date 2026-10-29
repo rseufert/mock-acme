@@ -10,7 +10,7 @@ says so where it does.
 
 Nothing yet.
 
-## [0.7.0] - 2026-10-26
+## [0.7.0] - 2026-10-29
 
 Goods receipts in SAP. **Changes behaviour:** `invoice_check` now posts a
 goods receipt to SAP for each shipment, and an invoice that names its
@@ -45,6 +45,18 @@ shipment waits for that receipt. The tests need mock-sap 0.22.0.
   is what catches it, and is what `ProcureToPay` uses.
 - `procure_to_pay.odata_string` is `invoice_check.odata_string`, moved where
   both use it.
+
+### Fixed
+
+- **A failed read of the invoices no longer loses the ship notices read just
+  before it** ([#63]). `invoice_check` collected both kinds from the
+  supplier's mailbox in one expression, and collecting takes a document out of
+  it: if the invoice request failed, the run raised before any notice was
+  recorded or received, and an invoice naming one of those shipments was held
+  for good. Each kind is now dealt with as soon as it is collected, and a
+  mailbox that does not answer is said in `InvoiceCheck.unread` rather than
+  raised. One that does not answer about the ship notices is not asked for the
+  invoices either; both stay for the next run.
 
 ## [0.6.1] - 2026-10-22
 
@@ -504,3 +516,4 @@ These differ from the last copies the mocks carried.
 [#46]: https://github.com/rseufert/mock-acme/issues/46
 [#53]: https://github.com/rseufert/mock-acme/issues/53
 [#56]: https://github.com/rseufert/mock-acme/issues/56
+[#63]: https://github.com/rseufert/mock-acme/issues/63

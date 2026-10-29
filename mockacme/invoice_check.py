@@ -337,6 +337,8 @@ class InvoiceCheck:
         # What became of each receipt: {"po", "shipment", and
         # "material_document" or "problem"}, oldest first.
         self.receipts = []
+        # Each mailbox read that did not answer, in words, oldest first.
+        self.unread = []
         self.shipped = {}       # po_number -> {item: quantity}, from 856s
         # (po_number, shipment number) -> {item: quantity}: each 856 by the
         # consignment it advises, for an invoice that names the one it bills.
@@ -547,33 +549,50 @@ class InvoiceCheck:
                 total, " and tax to %s" % tax if tax else "", invoice["total"]))
         return found
 
+    def collect(self, kind, code):
+        """Take one kind of document out of the mailbox, or None where the
+        mailbox did not answer, which is said in `unread`.
+
+        Collecting takes a document out of it, so only the two kinds this
+        reads are asked for. Asking for the whole mailbox took the supplier's
+        order responses as well and dropped them, and `po_bridge`, reading the
+        same mailbox afterwards, never confirmed the order (#8).
+        """
+        try:
+            found = edi(self.edi_base, "GET", "/_mock/mailbox?partner=%s&kind=%s"
+                        % (self.our_id, kind))
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            self.unread.append("the supplier's mailbox did not give its %s documents, so "
+                               "none was read this run: %s"
+                               % (kind, getattr(error, "reason", error)))
+            return None
+        return [doc for doc in found if doc["code"] == code]
+
     def run(self):
         """Collect ship notices and invoices; post what matches, block the rest.
 
-        Collecting from the mailbox takes a document out of it, so only the two
-        kinds this reads are asked for. Asking for the whole mailbox took the
-        supplier's order responses as well and dropped them, and `po_bridge`,
-        reading the same mailbox afterwards, never confirmed the order (#8).
+        Each kind is dealt with as soon as it is collected, because collecting
+        took it out of the mailbox: ship notices are recorded and received
+        before the invoices are asked for, so a mailbox that fails on the
+        invoices loses no notice (#63). A mailbox that does not answer about
+        the ship notices is not asked for the invoices either, which need
+        them; both stay in it for the next run.
         """
-        docs = [d for kind in ("despatch", "invoice")
-                for d in edi(self.edi_base, "GET", "/_mock/mailbox?partner=%s&kind=%s"
-                             % (self.our_id, kind))
-                if d["code"] in ("856", "810")]
-        for doc in docs:                       # ship notices first: invoices need them
-            if doc["code"] == "856":
-                po_number, lines = read_856(doc["payload"])
-                self.shipped.setdefault(po_number, {}).update(lines)
-                number = shipment_number(doc["payload"])
-                if number:
-                    self.notices[(po_number, number)] = lines
-                if self.receive_on_notice:
-                    self.unreceived.append((po_number, number, lines))
+        notices = self.collect("despatch", "856")
+        for doc in notices or []:              # ship notices first: invoices need them
+            po_number, lines = read_856(doc["payload"])
+            self.shipped.setdefault(po_number, {}).update(lines)
+            number = shipment_number(doc["payload"])
+            if number:
+                self.notices[(po_number, number)] = lines
+            if self.receive_on_notice:
+                self.unreceived.append((po_number, number, lines))
         # Before the invoices, which wait for their shipment's receipt.
         self.receive_waiting()
+        invoices = self.collect("invoice", "810") if notices is not None else None
         # Kept before anything is asked of SAP, so that an invoice SAP cannot
         # be asked about is still here next time (#13).
-        self.pending += [(read_810(doc["payload"]), False)
-                         for doc in docs if doc["code"] == "810"]
+        self.pending += [(read_810(doc["payload"]), False) for doc in invoices or []]
         results, still_pending = [], []
         for invoice, unanswered in self.pending:
             result, keep = self.check_one(invoice, unanswered)
